@@ -1,0 +1,1475 @@
+---
+title: "Gas Flux Data Analysis: Trends So Far"
+output: 
+  html_document:
+    code_folding: hide
+    theme: journal
+    toc: TRUE
+    toc_float: TRUE
+date: "`r Sys.Date()`"
+---
+
+# Looking at the Data
+My first step was to read in the data from this summer ([Visit Level Data Master](https://docs.google.com/spreadsheets/d/1bEeLGy_V4fCCAN53Vip1kEdjaSbTmMk9R6YeXoFD9Yw/edit?usp=sharing) - in Research/Beavers/AWA Beaver Project/Data). My R scripts for processing the data are in Research/Beavers/AWA Beaver Project/R Scripts and on Github [here](https://github.com/Spencer-D-Johnson/Gas_Flux); I entered the data from the data sheets manually, used 'gas.flux.start.end.time.plotting.R' to find the intervals for slope calculations, then ran 'Gas_flux_calculations.R' to calculate the rest.
+
+I've separated out light and dark measurements to get photosynthesis and respiration. I'm assuming that the collar respiration rate is the CO2 flux from the dark measurement, and the collar photosynthesis rate (Gross Primary Production) is the CO2 flux from light (Net Primary Production) minus the CO2 flux from dark. There are complications to this setup, of course: our immediate on/off switch with the plastic bags may not perfectly represent base respiration, particularly at night (for example, [one recent paper](https://www.nature.com/articles/s43247-024-01312-y) suggests that respiration declines throughout the night). And differences in other conditions between light and dark (like temperature) may cause some error in the photosynthesis rate. Still, these approximations are the best we have.
+
+```{r message = FALSE, warning = FALSE}
+# Load packages
+library(tidyverse)  # tidy data processing and ggplot
+library(mgcv)  # for GAMs
+library(GGally)  # correlation plot
+library(viridis)  # color schemes
+library(gratia)  # Plotting smooths from GAMs
+library(knitr)  # kable() for tables
+theme_set(theme_bw())  # use black and white theme for plots
+
+# Read in master .csv, convert categorical variables to factors
+visit = read.csv("Visit Level Data Master.csv")
+visit = visit %>% filter(Flag != "Extra" & Flag != "Extra_Pair") # Get rid of extra measurements
+visit$CollarID = as.factor(visit$CollarID)
+visit$Site = as.factor(visit$Site)
+
+# Calculate decimal hours to see if time of day matters; might be useful to use lux sensors or other data source to calculate time since sunrise
+visit$dec.hrs = hour(hms(visit$Time_Seal)) + (minute(hms(visit$Time_Seal))/60)
+    
+# Separate out light measurements
+light = visit %>% 
+  filter(Light_Dark == "Light")
+# Separate out dark measurements
+dark = visit %>% 
+  filter(Light_Dark == "Dark")
+# Calculate photosynthesis by subtracting dark from light for corresponding measurements (assumes respiration rate is constant between light and dark measurements)
+photo = data.frame(CollarID = light$CollarID, 
+                   Date = light$Date,
+                   Site = light$Site,
+                   Photosynthesis_umolCO2_m.2_s.1 = light$CO2_flux_umol_m.2_sec.1 - dark$CO2_flux_umol_m.2_sec.1)
+
+photo_join = light %>% inner_join(photo, by = c("CollarID", "Date", "Site"))
+photo_join$CollarID = as.factor(photo_join$CollarID)
+photo_join$Site = as.factor(photo_join$Site)
+```
+
+## Gas Flux Across Time
+
+### CO2 Flux
+
+#### Net Exchange (Light Measurements)
+
+Here you can see the CO2 flux for light measurements ($\mu mol/(m^2s)$). Time is represented as the number of days since the average soil thaw date (May 2nd). The red line shows when we started our dam build/repair.
+```{r}
+ggplot(light, aes(x = Days_Since_Thaw, y = CO2_flux_umol_m.2_sec.1, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 1.5, alpha = 0.75) +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "CO2 Flux (umol m-2 s-1)") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  facet_wrap(~Site, ncol = 1)
+```
+
+Most (though not all) of the light measurement fluxes are negative, which indicates a net drawdown of CO2. We see the greatest drawdown at certain collars with tall grass at Tim West.
+<Br>
+</Br>
+
+#### Respiration (Dark):
+
+Next, I plotted CO2 flux for dark measurements, primarily showing cellular respiration within the collars. A small amount of CO2 is likely being converted to CH4; there may be other processes at play as well.
+```{r}
+ggplot(dark, aes(x = Days_Since_Thaw, y = CO2_flux_umol_m.2_sec.1, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 1.5, alpha = 0.75) +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "CO2 Flux (umol m-2 s-1)") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  facet_wrap(~Site, ncol = 1)
+```
+
+Pre-dam, respiration was often higher at Mid and West than at East, where the soil is constantly saturated. However, after our dam work, respiration went down considerably at West, and nearly reached zero at certain East collars. By early October, there was virtually no respiration at East and West, and little respiration (though slightly more) at Mid.
+<Br>
+</Br>
+
+#### Photosynthesis
+Here's what we assume to be photosynthetic flux (light minus dark):
+```{r}
+ggplot(data = light %>% inner_join(photo, by = c("CollarID", "Date", "Site")), 
+       aes(x = Days_Since_Thaw, y = Photosynthesis_umolCO2_m.2_s.1, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 1.5, alpha = 0.75) +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "Photosynthetic CO2 Flux (umol m-2 s-1)") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  facet_wrap(~Site, ncol = 1)
+```
+
+Photosynthesis rates were a little higher in midsummer for certain collars at West, but overall were fairly consistent (though variable) from June through August. By early October, there was no meaningful photosynthesis occurring. I'm not sure what to make of the slightly positive photosynthetic fluxes (the highest is ~0.8 $\mu mol/(m^2s)$). In the modelling below, I take these at face value and chalk them up to imprecise measurements; I don't see what would cause more CO2 output in the light measurements than the dark measurements except for maybe temperature, which would be a flaw in our assumption that light and dark measurements have no meaningful environmental differences outside of the light level.
+<Br>
+</Br>
+
+### CH4 Flux
+
+This next graph shows the raw methane flux values:
+```{r}
+ggplot(data = visit, 
+       aes(x = Days_Since_Thaw, y = CH4_flux_umol_m.2_sec.1, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 1.5, alpha = 0.75) +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "CH4 Flux (umol m-2 s-1)") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  facet_wrap(~Site, ncol = 1)
+```
+
+Methane flux is relatively high at East, and much lower at West. Production increased drastically in August at one collar at Mid (TMH2). That collar is near a stagnant pool, which may be a contributing factor. If I remove that collar and free the scales for the subplots, we can see more detail:
+
+```{r}
+ggplot(data = visit %>% filter(CollarID != "TMH2"), 
+       aes(x = Days_Since_Thaw, y = CH4_flux_umol_m.2_sec.1, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 1.5, alpha = 0.75) +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "CH4 Flux (umol m-2 s-1)") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  facet_wrap(~Site, ncol = 1, scales = "free_y")
+```
+
+At East, there's been a drop in methane production since the dam went in, mostly at certain collars that are now in deeper water. Methane production mostly occurs at a few collars at Mid, and dropped at these collars in October. At West, the absolute production levels are small, but you can really see the combined effects of water levels and time. Methane production was higher early in the season when the water level was high but swiftly dropping (the site had been flooded since breakup). Methane was being slowly consumed on net in early July, and production was still basically 0 just after a rain event in mid-July despite the site being flooded again. Methane production was higher in the third week of August than the second week despite lower water levels - presumably because having been flooded for longer, more of the site was anoxic, or the anoxic conditions had persisted long enough for more methanogens to grow.
+</Br>
+
+## Water Level
+
+Here's a plot of water levels from our piezometers across the summer. Water levels are shown with respect to the ground surface (positive = standing water). 
+
+```{r}
+ggplot(light, aes(x = Days_Since_Thaw, y = Water_Level_cm, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 2, width = 1, height = 0, alpha = 0.75) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  facet_wrap(~Site, ncol = 1, scales = "free_y") +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "Water Level (cm)")
+```
+
+You can see that nothing changes that much across the summer and fall at the mid site. East has consistently high-ish water levels throughout (probably because of the impermeable soil), but after the dam work, certain collars that are now in the pond have much higher water. West is the flashiest site, but since putting in the BDA the water levels have been consistently high.
+<Br>
+</Br>
+
+## Vegetation
+
+We've collected a lot of vegetation data for the beaver project. Here, I look at two general categories of vegetation variables. The first is biomass. You would expect that vegetation biomass would have a significant effect on at least photosynthesis and respiration rates, and we can calculate a rough biomass proxy by combining June 2024 percent covers with visit-level max vegetation heights. The second category is percent cover by vegetation type (e.g., herbaceous, woody, potential methane straw). We have a limited number of collars, and vegetation types are largely similar within sites, so these variables may have limited utility, but I wanted to examine them anyway. The next step would be to ordinate the veg communities and plot them with gas flux variables to look for additional patterns. I think Rhiannon is working on that step.
+
+### Biomass
+
+There are a number of approaches for calculating biomass. Originally, I was just doing top cover * max height, which makes some sense - it's simple, and top cover may be more representative of photosynthetically relevant plant material than total cover. However, I figured the cover part could be improved a bit by taking out bryophyte cover (too small to contribute meaningfully to photosynthesis), and I wasn't sure whether top cover or total cover would make more sense. I also thought the height estimate could potentially be improved by separating out woody vs herbaceous cover, and matching those to max woody and herbaceous heights. I tried 6 total formulations:
+
+1) bm1 = top cover * max height
+
+2) bm2 = non-bryophyte top cover * max height
+
+3) bm3 = top woody cover * max woody height + top herbaceous cover * max herbaceous height
+
+4) bm4 = total cover * max height
+
+5) bm5 = total non-bryophyte cover * max height
+
+6) bm6 = total woody cover * max woody height + total herbaceous cover * max herbaceous height
+
+I plotted each of these with respect to each other and to photosynthetic flux for June and July measurements - ie., when the most photosynthesis was happening, and before the dam work (which complicates the data):
+
+```{r message = FALSE, fig.width = 9, fig.height = 9}
+# Bring in veg type data
+gpi = read.csv("beaver_GPI_full.csv") # total foliar cover (multilayer)
+top = read.csv("beaver_GPI_top.csv") # just top foliar cover
+ref = read.csv("veg_ref.csv") %>% rename(Species_Name = name) # functional group reference table
+
+# Define CollarID variable as factor (separate out month)
+gpi$CollarID = as.factor(substr(gpi$site_visit_code, 1, 4))
+top$CollarID = as.factor(substr(top$Site, 1, 4))
+
+# Look at ACCS veg functional groups, add functional groups to top cover data
+# unique(gpi$analysis_name)
+top = top %>% left_join(ref[,1:2], by = "Species_Name")
+# top %>% filter(is.na(fn_gr)) # solved NA issues
+# unique(top$fn_gr)
+
+# Redefine simpler veg categories (try 2 different schemes)
+gpi$simple_cats = fct_collapse(gpi$analysis_name, # More detailed scheme
+                                    tall_woody = "shrub",
+                                    dwarf_woody = c("dwarf shrub", "dwarf ericaceous shrub"), # separate out dwarf since dwarf shrubs probably have minimal effect on photosynthesis
+                                    graminoid = c("grass", "sedge"),
+                                    forb = c("forb", "horsetail", "clubmoss"),
+                                    moss = c("sphagnum moss","acrocarpous moss","feathermoss","moss"))
+gpi$simple_cats2 = fct_collapse(gpi$analysis_name, # Less detailed scheme
+                                    woody = c("shrub", "dwarf shrub", "dwarf ericaceous shrub"),
+                                    herb = c("grass", "sedge", "forb", "horsetail", "clubmoss"),
+                                    moss = c("sphagnum moss","acrocarpous moss","feathermoss","moss"))
+top$simple_cats2 = fct_collapse(top$fn_gr, # Less detailed scheme
+                                    woody.t = c("shrub", "dwarf shrub", "dwarf ericaceous shrub"),
+                                    herb.t = c("grass", "sedge", "forb", "horsetail"),
+                                    moss.t = c("sphagnum moss","acrocarpous moss","feathermoss","moss"))
+
+# Define high-methane species - based on Rhiannon's research so far, and assuming Carex utriculata and all horsetails are methane straws
+gpi$methane_cats = fct_collapse(gpi$akvegcode,
+                                high_CH4 = c("carutr","compal","equarv","equflu","equsyl"),
+                                other_level = "other_CH4")
+
+# Filter to live vegetation in June 2024
+gpi.lj = gpi %>% filter(dead_status == "FALSE",
+                        substr(site_visit_code, 6, 12) == "Jun2024")
+top.lj = top %>% filter(dead_status == "FALSE",
+                        substr(Site, 6, 12) == "Jun2024")
+
+# Get summaries of all the different cover variables, put them into one table, join with the table with all the data
+sum1 = gpi.lj %>% group_by(CollarID, simple_cats) %>% 
+  summarise(cover = sum(cover_percent)) %>% pivot_wider(names_from = simple_cats, values_from = cover, values_fill = 0)
+sum2 = gpi.lj %>% group_by(CollarID, simple_cats2) %>% 
+  summarise(cover = sum(cover_percent)) %>% pivot_wider(names_from = simple_cats2, values_from = cover, values_fill = 0)
+sum3 = gpi.lj %>% group_by(CollarID, methane_cats) %>% 
+  summarise(cover = sum(cover_percent)) %>% pivot_wider(names_from = methane_cats, values_from = cover, values_fill = 0)
+sum4 = top.lj %>% group_by(CollarID, simple_cats2) %>% 
+  summarise(cover = sum(Percent_Foliar_Cover)) %>% pivot_wider(names_from = simple_cats2, values_from = cover, values_fill = 0)
+cover_sum = sum1 %>% inner_join(sum2) %>% inner_join(sum3) %>% inner_join(sum4) %>% select(-c(other_CH4))
+visit = visit %>% inner_join(cover_sum, by = "CollarID")
+visit = visit %>% mutate(bare = 100 - woody.t - herb.t - moss.t)
+
+# Calculate 6 possible forms of biomass; use proportions rather than percents
+visit$bm1 = (visit$woody.t + visit$herb.t + visit$moss.t)*visit$Max_Ht_cm/100
+visit$bm2 = (visit$woody.t + visit$herb.t)*visit$Max_Ht_cm/100
+visit$bm3 = apply(cbind(visit$woody.t*visit$Max_Ht_Wood_cm, visit$herb.t*visit$Max_Ht_Herb_cm),1,sum,na.rm = TRUE)/100
+visit$bm4 = (visit$woody + visit$herb + visit$moss)*visit$Max_Ht_cm/100
+visit$bm5 = (visit$woody + visit$herb)*visit$Max_Ht_cm/100
+visit$bm6 = apply(cbind(visit$woody*visit$Max_Ht_Wood_cm, visit$herb*visit$Max_Ht_Herb_cm),1,sum,na.rm = TRUE)/100
+# Average light and dark methane
+methane.avg = visit %>% group_by(CollarID, Date, bm1, bm2, bm3, bm4, bm5, bm6) %>% summarise(mean_CH4_flux = mean(CH4_flux_umol_m.2_sec.1))
+
+# Put photosynthesis, respiration, avg methane into one table with biomass variables, plot correlations.
+biom = photo %>% inner_join(dark) %>% 
+  inner_join(methane.avg) %>%  # leave out methane flux data for final graph - not as relevant
+  filter(as.integer(substr(Date,1,1)) %in% 6:7) %>%  # summer readings before dam work
+  select(c(bm1, bm2, bm3, bm4, bm5, bm6, Photosynthesis_umolCO2_m.2_s.1, CO2_flux_umol_m.2_sec.1)) %>%
+  rename(Phot = Photosynthesis_umolCO2_m.2_s.1, Resp = CO2_flux_umol_m.2_sec.1)
+
+# Set biomass proxy
+visit$Biomass = visit$bm5
+visit = visit %>% select(-c(bm1,bm2,bm3,bm4,bm5,bm6))
+visit$log.Biomass = log(visit$Biomass)  # for later modelling
+
+ggpairs(biom) # All pretty similar performance for photosynthesis and respiration; Looks like total veg cover is a little better than top cover (especially for respiration); removing mosses is maybe a little better than not, but no clear conclusion; split woody-herbaceous heights not clearly better or worse; simpler is probably better so maybe go with total cover with no moss (bm5)? Removing moss would make sense.
+```
+
+All of these biomass proxies are quite similar to each other, unsurprisingly. Top cover and total cover show some separation from each other, but within these broader categories the specifics don't matter that much. In general, it seems like total cover is a little better correlated with CO2 flux than top cover - particularly with respiration. Non-bryophyte total cover and split woody-herbaceous total cover seem like the best options; the former is slightly more correlated with respiration, while the latter is slightly more correlated with photosynthesis, though the differences are probably too small to matter. **I'll use non-bryophyte total cover for biomass** moving forward: splitting up woody and herbaceous seems unnecessarily complicated if there's no clear benefit, but removing bryophytes does make intuitive sense and seems to improve the correlation a little bit for respiration.
+<Br>
+</Br>
+
+### Types of Cover
+
+This next plot shows total percent cover from various categories versus gas flux, again just for June and July 2024. The categories shown are moss (equivalent to "bryophyte" for these sites), forb, graminoid, woody, "tall woody" (dwarf shrubs might create noise in the woody shrub effect), herbaceous, bare, and "High CH4". High CH4 includes the species that Rhiannon has flagged as potential methane straws - *Carex utriculata*, *Comarum palustre*, and *Equisetum arvense* - as well as the other horsetails (*E. fluviatile* and *E. sylvaticum*).
+
+```{r message = FALSE, fig.width = 9, fig.height = 9}
+# Plot various types of total cover vs gas flux
+cover = photo %>% inner_join(visit %>% filter(Light_Dark == "Dark")) %>% 
+  inner_join(methane.avg) %>% 
+  filter(as.integer(substr(Date,1,1)) %in% 6:7) %>%  # again, just look at June and July
+  select(c(moss, forb, graminoid, tall_woody, woody, herb, bare, high_CH4, Photosynthesis_umolCO2_m.2_s.1, CO2_flux_umol_m.2_sec.1, mean_CH4_flux)) %>%
+  rename(Phot = Photosynthesis_umolCO2_m.2_s.1, Resp = CO2_flux_umol_m.2_sec.1, CH4 = mean_CH4_flux)
+
+ggpairs(cover) # photosynthesis: strongest relationship with %herb; respiration: strongest with %forb weirdly, similar with %herb overall; CH4: strongest relationship is with %high_CH4, MAYBE slight negative relationship with %woody; all of these may be (likely to be) confounded with other variables (esp. site)
+```
+
+There's a lot to process here. Photosynthesis is somewhat correlated to %forb, %graminoid, %herbaceous, and %bare. Percent herbaceous has the highest correlation, and is probably the most robust variable to use between the first three. Both %herbaceous and %bare are probably highly related to biomass. Respiration has its highest correlation with %forb - maybe because forbs are more correlated to dry ground than graminoids? - but the correlation with %herbaceous is similar; again, %bare has a highly significant correlation. For methane, all of the correlations are lower. The highest correlation is, unsurprisingly, with %high CH4 species. It's also worth looking more closely at the scatterplots: for modelling with GAMs, we don't *necessarily* care about linear correlations so much as smooth relationships between variables. For example, %high CH4 has weak to nonexistent linear relationships with photosynthesis and respiration, but it looks like smooth curve fits could work a little better. 
+
+I'll consider **%herbaceous, %bare, and %high CH4 species** moving forward. I suspect all of these variables may be too correlated to other variables to provide much information, but we'll see. It's worth noting that vegetation variables might be more useful if we didn't have as many other environmental variables, like water level. The New England gas flux researchers at the Annual Meeting made the point that plants integrate a lot of other environmental conditions.
+<Br>
+</Br>
+
+## Light
+
+### 2024 Overview
+
+Here's a plot of light intensity (Lux) at each collar across all 2024 light measurements:
+```{r}
+ggplot(light, aes(x = Days_Since_Thaw, y = Mean_Lux, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 2, width = 1, height = 0, alpha = 0.75) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  facet_wrap(~Site, ncol = 1, scales = "free_y") +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "Light Intensity (mean Lux)")
+```
+
+Light obviously varies on a time-of-day and week to week basis - the middle of July must have been cloudy, for example. Light was MUCH lower in October for most collars.
+<Br>
+</Br>
+
+### Lux vs PAR and considering angle
+
+While we're measuring light intensity, we ultimately care about photosynthetically active radiation (PAR) - the light that plants actually use. If these two variables have a linear relationship - or potentially any smooth relationship, if I'm using GAMs - then it doesn't matter much which one I use in the models for pure predictive purposes. In September, Chris helped me run a little experiment at the Homer SWMP station to see how Lux and PAR compare, and - crucially - whether the relationship between the two changes with the addition of greenhouse plastic. The results were generally encouraging, but interesting:
+
+```{r message = FALSE}
+# read in data
+full_swmp = read.csv("Homet_8-23-24.csv") %>% rename(time = DateTimeStamp)  # swmp data (ambient PAR)
+par_plastic = read.csv("Homet_8-23-24_PAR_plastic.csv") %>% rename(time = DateTimeStamp)  # Spencer's written PAR data with plastic (from swmp sensor)
+lux = read.csv("Homet_8-23-24_lux.csv") %>% rename(time = Date.Time..GMT.09.00)  # lux data from pendant sensor
+
+# Join lux and PAR data from plastic experiment
+plastic = lux %>% inner_join(par_plastic, by = "time")
+
+ggplot(plastic, aes(x = Intensity_LUX, y = PAR)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Lux vs PAR with Greenhouse Plastic")
+
+# run model, summarize and get confidence interval
+mod.plastic = lm(PAR ~ Intensity_LUX, data = plastic)
+summary(mod.plastic)
+confint(mod.plastic)
+```
+
+We see an almost perfect linear relationship with the greenhouse plastic. The slope is $3.55*10^{-5}$, which is similar to the slope for Lux vs PAR below without plastic ($3.79*10^{-5}$):
+
+```{r}
+# create period class time column for lux
+lux$period = hms(lux$time)
+# cut off incomplete/non-ambient time periods for lux
+lux_15min = lux %>% filter(period > "12H 30M 0S" & period <= "21H 30M 0S") 
+# create column with a different integer value for each 15 minute interval
+lux_15min$intervals = ceiling((1:nrow(lux_15min))/90)
+# Get table with 15 minute interval times from lux data, add interval number to join with summarized data below
+indices = seq(90, nrow(lux_15min), 90)
+swmp.times = lux_15min[indices, ]
+swmp.times$intervals = seq(1, nrow(lux_15min)/90, 1)
+
+# Get mean lux for each 15 minute interval
+lux_15min = lux_15min %>%
+  group_by(intervals) %>%
+  summarise(mean_lux = mean(Intensity_LUX),
+            mean_temp = mean(Temp_C)) %>% 
+  inner_join(swmp.times, by = "intervals")
+
+# convert from total PAR to instantaneous PAR
+full_swmp$PAR = full_swmp$TotPAR/180
+
+# Join lux and PAR data
+ambient = lux_15min %>% inner_join(full_swmp, by = "time") %>% select(time, mean_lux, mean_temp, ATemp, PAR)
+
+# Plot lux vs par
+ggplot(ambient, aes(x = mean_lux, y = PAR)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Ambient Lux vs PAR")
+
+# show linear model with confidence interval
+mod.ambient = lm(PAR ~ mean_lux, data = ambient)
+summary(mod.ambient)
+confint(mod.ambient)
+```
+
+The problem is, the ambient (non-plastic) relationship between Lux and PAR isn't linear. This `loess` smoother provides a much cleaner fit:
+
+```{r message = FALSE}
+ggplot(ambient, aes(x = mean_lux, y = PAR)) +
+  geom_point() +
+  geom_smooth(method = "loess") +
+  labs(title = "Ambient Lux vs PAR")
+```
+
+While I still don't know exactly why this is, my best guess is the angle of the light. These measurements were taken from midday to sundown, while the measurements with greenhouse plastic were all taken within a short period of time. According to the documentation, the angle of light matters quite a bit for the HOBO Pendant loggers we use for light and temperature; you're supposed to hang them so that they face direct sunlight. We try to position the gas flux chamber so that the loggers are positioned as close as possible to direct sunlight (Ryan's suggestion), but our transect loggers definitely are not always oriented toward the sun. At some point, I'd like to re-do this experiment at one of the weather stations; I'd also like to deploy a logger at beaver sites that's always facing up in an open area to get some comparative full-light data.
+<Br>
+</Br>
+
+### Light vs Dark Methane
+
+I also wanted to test whether there's any difference between light and dark measurements for methane flux:
+
+```{r message = FALSE}
+# light minus dark CH4
+light_minus_dark = light$CH4_flux_umol_m.2_sec.1 - dark$CH4_flux_umol_m.2_sec.1
+# use log values instead
+log_light_minus_dark = log(light$CH4_flux_umol_m.2_sec.1 + 0.01) - log(dark$CH4_flux_umol_m.2_sec.1 + 0.01)
+
+ggplot(as.data.frame(light_minus_dark), aes(x = light_minus_dark)) +
+  geom_histogram() +
+  labs(x = "Light minus Dark CH4 Flux (umol m-2 s-1)")
+  #xlim(c(-0.01, 0.01))
+
+t.test(log_light_minus_dark) # use log values for t-test
+```
+
+The histogram shows that there's no directional trend in methane flux between light and dark, and most of the differences are very small. The results of the t-test confirm that neither light nor dark measurements have consistently higher values (I used log values, but you get the same result either way). Moving forward, I will **average the light and dark measurements** when modelling methane flux.
+<Br>
+</Br>
+
+## Air Temperature
+
+Our air temperature data from the beaver project have some major issues. To get accurate air temperatures from the HOBO Pendant loggers - as with any temperature loggers, I suppose - you're supposed to always keep them shaded. Unfortunately, this makes it impossible to use the loggers effectively for both temperature and light at the same time. At this point, we are stuck with suboptimal temperature data for our first year of gas flux work. The best solution I've thought of is to build a model of temperature anomaly vs Lux, and then apply that model to correct the temperatures. When we ran the experiment at the Homer SWMP station, we also collected temperature data from the Pendant logger, and of course the SWMP station collects temperature. Here are the results (with the dashed line showing a 1:1 relationship):
+```{r}
+ggplot(ambient, aes(x = ATemp, y = mean_temp, color = mean_lux)) + 
+  geom_point() + 
+  scale_color_viridis_c() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(x = "Homer SWMP Temp (C, 15 min avg)", y = "Pendant Temp (C, 15 min avg)", color = "LUX (15 min avg)")
+```
+
+Temperature didn't vary much at the weather station, but sure enough, you can see that the Pendant sensor's temperature shoots up when light intensity increases. I tried modelling this using the following GAM: $(Temp_{Pendant}-Temp_{SWMP}) = f(LUX) + \beta$:
+
+```{r}
+gam_temp = gam((mean_temp - ATemp) ~ s(mean_lux), data = ambient)
+summary(gam_temp)
+draw(gam_temp)
+```
+
+The adjusted $R^2$ is 0.937, which is pretty good! I applied this model to the temperature data from the beaver sites and **will use the adjusted temperatures** moving forward in this analysis. In the future, it would be good to get some more data to back up the relationship - especially from a shaded sensor at the beaver sites themselves that we could compare to the temperatures at the transect sensors. Here's what the adjusted temperature data look like across the year, with light and dark measurements shown individually:
+
+```{r}
+# Add in true temp estimates
+## Read in and combine temp/lux data
+templux.files = list.files(pattern = "chamber*")
+templux.data.separate = lapply(templux.files, read.csv)
+
+# Combine into one table
+templux = templux.data.separate[[1]] %>% select(Date, Time_GMT.09.00, Temp_C, Intensity_Lux) %>% drop_na()
+
+for (i in 2:length(templux.data.separate)){
+  templux = rbind(templux, templux.data.separate[[i]] %>% select(Date, Time_GMT.09.00, Temp_C, Intensity_Lux) %>% drop_na())
+}
+
+templux$Intensity_Lux = as.numeric(templux$Intensity_Lux)  # make lux numeric (rather than character)
+templux$Date = mdy(templux$Date)
+
+# Get predictions from GAM for every true temp
+temp.preds = predict.gam(gam_temp,  newdata = data.frame(mean_lux = templux$Intensity_Lux))
+templux$delta = temp.preds
+templux$true_temp = templux$Temp_C - templux$delta
+
+# Create column
+visit$Mean_Temp_C_true_estimate = rep(NA, nrow(visit))
+
+# Convert measurement times to period class
+visit$ptime.start = hms(visit$Time_Start_Measurement)
+visit$ptime.end = hms(visit$Time_End_Measurement)
+
+## Get average temp, lux for measurement periods
+for (row in 1:nrow(visit)){
+  tl.subset = templux %>% filter(Date == mdy(visit[row, "Date"]) & as.numeric(hms(Time_GMT.09.00)) >= (as.numeric(visit[row, "ptime.start"]) + visit$Hobo_Licor_offset_s[row]) & as.numeric(hms(Time_GMT.09.00)) <= (as.numeric(visit[row, "ptime.end"]) + visit$Hobo_Licor_offset_s[row]))
+  visit$Mean_Temp_C_true_estimate[row] = mean(tl.subset$true_temp)
+}
+
+ggplot(visit, aes(x = Days_Since_Thaw, y = Mean_Temp_C_true_estimate, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 2, width = 1, height = 0, alpha = 0.75) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  facet_wrap(~Site, ncol = 1) +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "Estimated Mean Temperature (C)")
+```
+
+Some temperatures are still near or above 30 degrees C, which seems high. However, that might be realistic for temperatures inside the chamber on a sunny day, even if the ambient temperature outside is considerably lower.
+<Br>
+</Br>
+
+## Soil Temperature
+
+And finally, here is how soil temperatures have varied over time:
+```{r}
+ggplot(light, aes(x = Days_Since_Thaw, y = Soil_Temp_C, color = str_sub(CollarID, start = -2L, end = -2L), shape = str_sub(CollarID, start = -1L, end = -1L))) +
+  geom_jitter(size = 2, width = 1, height = 0, alpha = 0.75) +
+  geom_vline(xintercept = 88, color = "red") +
+  geom_hline(yintercept = 0, lty = "dotted") +
+  scale_color_manual(values = c("#CC79A7","#0072B2","#E69F00")) +
+  facet_wrap(~Site, ncol = 1) +
+  labs(color = "Collar Transect", shape = "Collar Position", x = "Days Since Thaw", y = "Soil Temperature (C)")
+```
+
+It looks like some of the hottest soil temperatures were in June, which makes some sense given the hot air temperatures at that time. It also looks like West had a little bit higher soil temperatures than Mid and East in general. I'm somewhat suspicious of our point-in-time soil temp data, at least at the finer details; we got some weirdly high temperatures early on when using the meat thermometer in standing water, and sometimes we had to make some judgement calls. The broad trends should be okay though.
+<Br>
+</Br>
+
+## Correlations between Variables
+
+I plotted each pair of potential predictor variables to check for issues with multicollinearity. Since I'm modelling fluxes with GAMs, we care not only about strong linear relationships between variables, but any smooth relationships between variables, which the scatterplots help with. Apparently, being able to produce a covariate term from smooths for other covariates is called "concurvity". You can assess concurvity after building a model, which I do further down (relationships between more than two terms may not show up in this correlation plot). 
+
+```{r message = FALSE, fig.width = 10, fig.height = 10}
+# Filter to covariates of interests: use light data only; only covariates that differ between light and dark are light (obviously) and temperature
+corr = visit %>% filter(Light_Dark == "Light") %>% 
+  select(Site, Days_Since_Thaw, dec.hrs, Water_Level_cm, Mean_Temp_C_true_estimate, Soil_Temp_C, Mean_Lux, Biomass, herb, bare, high_CH4) %>%  
+  rename(Day = Days_Since_Thaw,
+         Hr.of.Day = dec.hrs,
+         Water_Level = Water_Level_cm,
+         Air_Temp = Mean_Temp_C_true_estimate,
+         Soil_Temp = Soil_Temp_C,
+         Pct.Herb = herb,
+         Pct.Bare = bare,
+         Pct.HighCH4 = high_CH4)
+
+ggpairs(corr)
+```
+
+I see a few issues here:
+
+1) Days since thaw has a strong relationship with soil temp and, to a lesser extent, air temp. Air temp and soil temp are also correlated, though there is some meaningful variance between them. In my modelling below, I include the variables that make more sense as an explanatory variable. For methane flux, soil temp is more meaningful than day of year; air temp *might* make a difference. For photosynthesis, day of year is probably most meaningful, as it tracks the phenological progression of plants; air temp could also have some effect. For respiration, all 3 variables could have a meaningful effect: plant phenology matters, and both plants and soil microbes could contribute meaningfully to respiration, which we know is affected by temperature.
+
+2) Biomass and percent herbaceous are highly correlated. I initially tried including percent herbaceous in the model selection below for photosynthesis and respiration just to make sure it isn't offering some marginal extra information, but biomass is the better variable to use. Percent bare is also relatively correlated with both biomass and percent herbaceous. I include it in the respiration and methane models in case it's capturing something important in soil-air gas exchange.
+
+3) Percent high CH4 is highly unequal between sites, with high (though variable) cover at East and mostly low cover at Mid and West. I still include it in the methane model selection in case it's capturing something beyond site.
+<Br>
+</Br>
+
+# Modelling Gas Flux
+
+## Approach
+
+So far, I've been using generalized additive models (GAMs) to model gas flux. GAMs were Lauren's first idea, and they seem like a flexible and effective choice of model. Like linear or generalized linear models, GAMs add together the effects of different independent variables on a dependent variable, but unlike LMs and GLMs, the shape of that effect doesn't need to be constrained to a particular functional form - you can fit any smooth curve (often shortened to "smooth"). I looked through [this](https://r.qcbs.ca/workshop08/book-en/introduction-to-generalized-additive-mixed-models-gamms.html) tutorial to familiarize myself with GAMs initially, and I've also benefited from some other internet sources (like Stack Overflow). I'm interested in trying other models as well, particularly boosted regression trees (which have been used to model methane fluxes) or other machine learning approaches, though we may not have enough data to make any of those worthwhile. 
+
+One challenge with our dataset is that we have repeated measurements from each collar, and collar ID presumably has a major effect on flux that the other variables aren't going to fully capture. Statistical theory would say that collar ID should be included as a random effect; however, since we want to predict gas flux across the sites, not just at our collars, we will need models that don't include collar ID. I've included both types of models below. 
+
+An important part of model selection is to assess not only how well the model describes the full dataset, but how well it can predict new data. This is a particularly important distinction for our data, since we only have 27 truly independent data points (27 collars). To test model prediction, I use cross validation. There are different types of cross validation, but the general idea is that you pull out a subset of the data ("testing data"), build a model on the rest of the data ("training data"), apply the model to the testing data, and repeat this process systematically so that all of the data gets used equally in training and testing sets. Because the model is tested on "new data" each time, overfitting is properly reflected in the model accuracy. For models that don't include collar ID, I've been doing "27-fold" cross validation in which gas flux from each collar is predicted using data from other collars only. If our collar placement is relatively representative of the sites, this method should give us an estimate of how well we might predict gas flux at an entirely new collar. For models that do include collar ID, I'm doing 27-fold cross validation that doesn't divide training and testing by collar ID. I've written functions that incorporate these cross-validation schemes into best subsets model selection.
+
+Prompted by really low cross-validated accuracies for methane, I've found a couple ways to significantly reduce overfitting (with the help of Stack Overflow). One is to change the method from GCV (Generalized Cross Validation), the default, to REML (Restricted Maximum Likelihood). The other is to limit the value of K, which determines how many bends the smooths can have. K = 4 generally seems to give the best model accuracy. Limiting K makes sense physically: the predictor variables we're measuring are unlikely to have super complicated relationships to gas flux, especially within our limited dataset. I think the extra bends you get in the methane model when you don't limit K are probably just artifacts from the more extreme datapoints - they clearly bring down the predictive accuracy of the model.
+
+Another update I've made since the previous version of this analysis document is log-transforming the gas flux values. Methane flux clearly needed to be transformed, but I've realized that since methane, photosynthesis, and respiration are all primarily chemical processes, they're probably all driven more by multiplicative effects than by additive ones. For example, if the soil temp drops to near 0 degrees, we would expect all of the respiration fluxes to be multiplied by some very small coefficient, regardless of how big they were initially. An additive model would handle this clumsily at best - we might see a big negative partial effect at low soil temperatures that overstates the drop in respiration for collars with little vegetation and understates the drop for collars with a lot of vegetation. See the example formulation below. Biomass is the one variable in my mind that doesn't make much sense in this multiplicative framework: photosynthesis and respiration likely do scale linearly with biomass. For that reason, I use log-transformed biomass in the models below to aid in interpretation. 
+
+$Flux = C*e^{f(SoilTemp)}*e^{f(WaterLevel)}$ --> $ln(Flux) = f(SoilTemp) + f(WaterLevel) + C$ rather than $Flux = f(SoilTemp) + f(WaterLevel) + C$
+
+Another way to go about this would be to use a log link function in the GAM rather than log-transforming the raw data. The difference is that a link function says nothing about the assumed distribution of residuals; it only sets the relationship between predictors and response. For example, for count data, we could use a log link function and a Poisson family for the residuals. The residual distribution is used in the maximum likelihood estimation that finds the best fit model, and can change the best fit model considerably. By log-transforming the data, I'm essentially assuming a log-normal residual distribution. There might be another residual family that makes more sense; I tried changing the family to Gamma for photosynthesis and methane, but that gave me a worse model fit for methane (photosynthesis didn't change much).
+
+One limitation of log models is that they can't handle negatives; some of our drier measurements have had slightly negative methane fluxes, and a few photosynthetic fluxes came out slightly positive. I've added a small constant to all methane fluxes, and flipped the sign on photosynthetic fluxes (after subtracting a small constant). For these constants, I decided on 1 unit at the smallest place value that makes everything positive (e.g., 1, 0.1, 0.01), which seems relatively unbiased? Here's how log transformation affects the distributions of fluxes:
+```{r message = FALSE}
+# Separate out light and dark measurements again (updating since more variables have been added to 'visit')
+light = visit %>% 
+  filter(Light_Dark == "Light")
+dark = visit %>% 
+  filter(Light_Dark == "Dark")
+# Calculate photosynthesis by subtracting dark from light for corresponding measurements (repeating as above)
+photo = data.frame(CollarID = light$CollarID, 
+                   Date = light$Date,
+                   Site = light$Site,
+                   Photosynthesis_umolCO2_m.2_s.1 = light$CO2_flux_umol_m.2_sec.1 - dark$CO2_flux_umol_m.2_sec.1)
+
+photo_join = light %>% inner_join(photo, by = c("CollarID", "Date", "Site"))
+photo_join$CollarID = as.factor(photo_join$CollarID)
+photo_join$Site = as.factor(photo_join$Site)
+
+# Create pared down table with light/dark averaged methane, shorten variable names
+ch4.sub = dark %>% select(CollarID, Water_Level_cm, log.Biomass, Site, Soil_Temp_C, bare, high_CH4, Days_Since_Thaw)
+ch4.sub$AirTemp = (dark$Mean_Temp_C_true_estimate + light$Mean_Temp_C_true_estimate)/2
+ch4.sub$Hr.of.Day = (dark$dec.hrs + light$dec.hrs)/2
+ch4.sub$raw.CH4 = (dark$CH4_flux_umol_m.2_sec.1 + light$CH4_flux_umol_m.2_sec.1)/2
+ch4.sub$log.CH4 = log(ch4.sub$raw.CH4 + 0.01)
+  
+ch4.sub = ch4.sub %>%
+  rename(WL = Water_Level_cm,
+         BM = log.Biomass,
+         SoilTemp = Soil_Temp_C,
+         Bare = bare)
+
+### Log-transform CH4 flux, photosynthetic CO2 flux, and respiration (dark) CO2 flux
+ch4.sub$log.CH4 = log(ch4.sub$raw.CH4 + 0.01) # Add 0.01 to make all values positive (lowest flux is -0.0057); log model fit (R^2) improves noticeably when I lower the delta between the added constant and the most negative flux value (e.g. going from 0.01 to 0.006 for constant). This probably doesn't matter much - most of the effect on the model is probably at the low end where all the values are tiny anyway. Really what this constant does is it bounds the range of possible flux values - if the model were to set the log value to -inf, then the predicted flux would be -0.006. I'm not sure if it's best practice to bound the model very close to the lowest measured value or leave a bit of room for lower values. For now, it seems like adding one unit to the furthest decimal place that makes all values positive is a reasonable approach.
+
+photo_join$log.photo = log(-(photo_join$Photosynthesis_umolCO2_m.2_s.1 - 1)) # a few photosynthetic fluxes are slightly positive - highest is ~0.8
+
+dark$log.resp = log(dark$CO2_flux_umol_m.2_sec.1) # no dark CO2 fluxes are negative
+
+ggplot(ch4.sub, aes(x = raw.CH4)) + geom_histogram() + labs(title = "Raw CH4 Fluxes", x = "CH4 Flux (umol CH4 m-2 s-1)") # non-log values
+ggplot(ch4.sub, aes(x = log.CH4)) + geom_histogram() + labs(title = "Log-Transformed CH4 Fluxes", x = "ln(CH4 Flux)") # log values (still not normal but closer)
+
+ggplot(photo_join, aes(x = -Photosynthesis_umolCO2_m.2_s.1)) + geom_histogram() + labs(title = "Raw Photosynthetic Fluxes", x = "Photosynthetic Flux (umol CO2 m-2 s-1)") # non-log values
+ggplot(photo_join, aes(x = log.photo)) + geom_histogram() + labs(title = "Log-Transformed Photosynthetic Fluxes", x = "ln(Photosynthetic Flux)") # log values (still not normal but closer)
+
+ggplot(dark, aes(x = CO2_flux_umol_m.2_sec.1)) + geom_histogram() + labs(title = "Raw Respiration Fluxes", "CO2 Flux (umol CO2 m-2 s-1)") # non-log values
+ggplot(dark, aes(x = log.resp)) + geom_histogram() + labs(title = "Log-Transformed Respiration Fluxes", "ln(CO2 Flux)") # log values (still not normal but closer)
+```
+
+The distribution of methane fluxes still isn't normal after log transformation, but it's a lot closer. Log-transforming photosynthetic and respiration fluxes converts both from right-skewed to somewhat left-skewed.
+
+I've built a set of functions to choose the best subset of variables for explaining flux. The functions produce three diagnostics for each model: $R^2$, mean average error (MAE), and root mean squared (RMS) error; these diagnostics are produced for both the log values (what the model is built off of) and the raw values. I also included a lower cutoff option for the non-cross validated model $R^2$. With a lot of potential variables, the functions take a long time to run; it saves some time and computing power to check the $R^2$ first and just throw out the models that miss the cutoff before going through the rest of the calculations. I've also included options for only including certain numbers of variables in the model. I'm sure there are other ways to improve efficiency; there might be ways to incorporate `caret`, but I'm not sure how to incorporate my specific cross validation scheme.
+```{r}
+# Build a GAM formula for a variable set with undetermined length
+build.form = function(dep, ind, k, dataset){
+  # dep = dependent variable name, ind = vector of independent variable names, k = value of k for each numeric variable smooth in GAM formula, dataset = name of data frame
+  begin = paste(dep,"~")  # start formula
+  for (i in 1:length(ind)){
+     if (i != 1){   # add a plus sign for each variable after the first
+       begin = paste(begin, "+")
+     }
+     if (ind[i] %in% c("CollarID","Transect","CollarID, Lux")){   # add random effect for CollarID, Transect, or CollarID slope with Lux
+       begin = paste(begin, 's(', ind[i], ', bs = "re")')
+     }
+     else if (is.numeric(dataset[,ind[i]])){   # add smooth for numeric variable
+       begin = paste(begin, "s(", ind[i], ", k = ",k,")")
+     }
+     else { begin = paste(begin, ind[i]) }  # add non-smoothed effect for other non-numeric variable (e.g., site)
+  }
+  return(as.formula(begin))
+}
+
+# Paste variable names together (for model representation in a table)
+paste_all = function(ind){
+  # ind = vector of independent variable names
+  vars = ""
+  for (i in 1:length(ind)){
+    vars = paste(ind[i], vars, sep = "  ")
+  }
+  return(vars)
+}
+
+# Run CV (collar-wise if Collar ID isn't included); generate R^2, MAE, RMS error stats; if it's a log model, generate same stats for raw (non-log) predictions
+collar.cv = function(dep, ind, dataset, is.log, raw.name, offset, k){
+  # dep = dependent variable name; ind = vector of independent variable names; dataset = name of data frame; is.log = whether it's a log model (TRUE/FALSE); raw.name = name of variable representing raw (non-log) values of dependent variable, if model is a log model; offset = value added to raw values to remove negatives before log transformation (used for back transformation of predictions); k = value of k for each numeric variable smooth in GAM formula
+  
+  # Create an empty list to collect stats, set a count to index in list, set model formula 
+  full.preds = list()
+  count = 1
+  form = build.form(dep, ind, k, dataset)
+  
+  # Path for models with Collar ID (random effect)
+  if ("CollarID" %in% ind){
+    u = rep(1,27)  # vector for number of unique collars in each testing group
+    rounds = nrow(dataset)/27  # rounds of data collection = number of observations in each test set (**assumes even sampling design**)
+    while (1 %in% u){  # Randomly order the dataset, see if resulting 27 divisions leave any test sets with only one collar (which would mean that collar isn't in the training set); if any do, reorder the dataset
+      samp = sample(1:nrow(dataset), nrow(dataset), replace = FALSE)
+      for (i in 1:27){
+        u[i] = length(unique(dataset[samp[((i-1)*rounds+1):(i*rounds)],"CollarID"]))
+      }
+    }
+    
+    # Run CV using divisions from random order above, generate predicted vs actual values (log and raw, if relevant)
+    for (i in 1:27){
+      train = dataset[-samp[((i-1)*rounds+1):(i*rounds)],]
+      test = dataset[samp[((i-1)*rounds+1):(i*rounds)],]
+      mod = gam(form, data = train, method = "REML")
+      preds = predict.gam(mod, test)
+      full.preds[[count]] = data.frame(Predicted = preds, Actual = test[,dep])
+      if (is.log == TRUE){
+        full.preds[[count]][,"Predicted.raw"] = exp(preds) - offset
+        full.preds[[count]][,"Actual.raw"] = test[,raw.name]
+      }
+      count = count + 1
+    }
+  }
+  
+  # Path for models without random effect
+  else{
+    # Run collar-wise CV, generate predicted vs actual values (log and raw, if relevant)
+    for (collar in unique(dataset[,"CollarID"])){
+      train = dataset %>% filter(CollarID != collar)
+      test = dataset %>% filter(CollarID == collar)
+      mod = gam(form, data = train, method = "REML")
+      preds = predict.gam(mod, test)
+      full.preds[[count]] = data.frame(Predicted = preds, Actual = test[,dep])
+      if (is.log == TRUE){
+        full.preds[[count]][,"Predicted.raw"] = exp(preds) - offset
+        full.preds[[count]][,"Actual.raw"] = test[,raw.name]
+      }
+      count = count + 1
+    }
+  }
+  
+  # Create 1-row table of diagnostics (R2, MAE, RMS)
+  full.preds = bind_rows(full.preds)
+  accuracy.stats = data.frame(Size = length(ind),
+                              Variables = paste_all(ind),
+                              R2 = cor(full.preds$Predicted, full.preds$Actual)^2,
+                              MAE = mean(abs(full.preds$Predicted - full.preds$Actual)),
+                              RMS = sqrt(mean((full.preds$Predicted - full.preds$Actual)^2)))
+  
+  # If it's a log model, add raw diagnostics
+  if (is.log == TRUE){
+    accuracy.stats$R2.raw = cor(full.preds$Predicted.raw, full.preds$Actual.raw)^2
+    accuracy.stats$MAE.raw = mean(abs(full.preds$Predicted.raw - full.preds$Actual.raw))
+    accuracy.stats$RMS.raw = sqrt(mean((full.preds$Predicted.raw - full.preds$Actual.raw)^2))
+  }
+  
+  return(accuracy.stats)
+}  
+
+# Find the best model from all combinations of variables - return sorted table with accuracy stats
+best.sub = function(dep, ind, dataset, min.var = 1, max.var = NA, is.log = FALSE, raw.name = NA, offset = 0, k = 4, sort.by = "MAE", rsq.min = 0.5){
+  # dep = dependent variable name; ind = vector of independent variable names; dataset = name of data frame; min.var = minimum number of variables to include in model (default 1); max.var = maximum number of variables to include in model (default NA - max set to max number of variables in 'ind'); is.log = whether the model is a log model (TRUE/FALSE); raw.name = name of variable representing raw (non-log) values of dependent variable, if model is a log model; offset = value added to raw values to remove negatives before log transformation (used for back transformation of predictions); k = value of k for each numeric variable smooth in GAM formula; sort.by = diagnostic to sort table by (R2, MAE, RMS, R2.raw, MAE.raw, or RMS.raw); rsq.min = minimum r-squared for non-cross validated model - models with lower value are thrown out before cross validation
+  
+  # Create empty list for accuracy stats of candidate models
+  acc = list()
+  count = 1
+  
+  if (is.na(max.var)){
+    max.var = length(ind)
+  }
+  
+  # Loop through each possible number of variables in model
+  for (nvar in min.var:max.var){
+    combos = combn(ind, nvar)
+    # Loop through each combination of variables for given number of variables
+    for (i in 1:ncol(combos)){
+      # Run model on full data
+      mod.full = gam(build.form(dep, combos[,i], k, dataset), data = dataset, method = "REML")
+      # if R2 is above minimum, run CV and get diagnostic stats
+      if (summary(mod.full)$r.sq >= rsq.min){
+        acc[[count]] = collar.cv(dep, combos[,i], dataset, is.log, raw.name, offset, k)
+        count = count + 1 }
+    }
+  }
+  
+  # Combine diagnostics for each candidate model
+  acc = bind_rows(acc)
+  return(arrange(acc, .data[[sort.by]]))
+}
+```
+<Br>
+</Br>
+
+## Photosynthesis
+
+I'm considering photosynthesis and respiration separately rather than looking at net CO2 exchange, since the two processes have different drivers. In the models below, photosynthetic flux values are shown as positive - that is, more $CO_2$ drawdown = greater positive flux.
+
+### Without Collar ID
+
+My candidate variables for photosynthesis models without Collar ID are light intensity, water level, time of year (days since thaw), log biomass, site, air temperature (corrected), and hour of the day.
+
+```{r}
+# Make photosynthesis values positive
+photo_join$neg.photo = -photo_join$Photosynthesis_umolCO2_m.2_s.1
+# Create pared down table, shorten variable names
+photo.sub = photo_join %>% select(CollarID, Photosynthesis_umolCO2_m.2_s.1, log.photo, neg.photo, Mean_Lux, Water_Level_cm, Days_Since_Thaw, log.Biomass, Site, Mean_Temp_C_true_estimate, dec.hrs) %>%
+  rename(Lux = Mean_Lux,
+         WL = Water_Level_cm,
+         Day = Days_Since_Thaw,
+         BM = log.Biomass,
+         AirTemp = Mean_Temp_C_true_estimate,
+         Hr.of.Day = dec.hrs,
+         raw.photo = Photosynthesis_umolCO2_m.2_s.1)
+
+# Run model selection (set min R2 = 0.75)
+photo.select = best.sub("log.photo", c("Lux", "WL", "Day", "BM", "Site", "AirTemp", "Hr.of.Day"), photo.sub, is.log = TRUE, raw.name = "neg.photo", offset = 1, rsq.min = 0.7)
+
+kable(photo.select, digits = 2)
+```
+
+It looks like the best model, with an $R^2$ of 0.73, uses **log biomass, days since thaw, water level, light intensity, and site**. The best model with 4 variables - i.e., excluding site - has basically the same diagnostics for the log values but a little bit worse diagnostics for the raw values; it seems that site *may* have a small but real effect. Interestingly, the best model with 3 variables removes light intensity. Let's see the summary and plots for the top model:
+
+```{r}
+gam_phot = gam(log.photo ~ s(Lux, k=4) + s(WL, k=4) + s(Day, k=4) + s(BM, k=4) + Site, data = photo.sub, method = "REML")
+summary(gam_phot)
+draw(gam_phot)
+```
+
+Light intensity is important for photosynthesis, though the effect seems to level off at ~50,000 Lux. Water level is also important - mostly in that plants that are flooded seem to photosynthesize less. Though this effect is significant, it might be specific to our site circumstances - presumably a more stable wetland site would have an established wetland community that's more accustomed to high water. Days since thaw is important, with increased photosynthesis in midsummer and much-reduced (basically non-existent) photosynthesis by October. Log biomass has the nice linear relationship that we'd expect with log-transformed photosynthesis. If you look at the summary, the difference between sites is that Mid has a slightly lower photosynthetic flux than East; I wondered if this was because of the prevalence of woody vegetation there, but adding in percent woody cover as a variable doesn't help. Next, I checked for concurvity issues with these variables:
+
+```{r}
+concurvity(gam_phot)
+# concurvity(gam_phot, full = FALSE)
+```
+
+There isn't a strict cutoff for what level of concurvity is a problem, though this [thread](https://stats.stackexchange.com/questions/401401/what-is-the-acceptable-level-of-concurvity) suggests anywhere from above 0.3 to above 0.8. Full model concurvity isn't that high except for with the parametric variable (site). However, the pairwise concurvities between parametric and other variables are all super low, so I don't really know what to make of the overall value of 0.8. Maybe this is a reason to exclude site altogether?
+
+Finally, I plotted predicted versus actual values:
+
+```{r}
+# Run CV (collar-wise if Collar ID isn't included); return log and raw predictions along with actual values
+collar.cv.full = function(dep, ind, dataset, is.log = TRUE, raw.name, offset, k = 4){
+  # dep = dependent variable name; ind = vector of independent variable names; dataset = name of data frame; is.log = whether it's a log model (TRUE/FALSE); raw.name = name of variable representing raw (non-log) values of dependent variable, if model is a log model; offset = value added to raw values to remove negatives before log transformation (used for back transformation of predictions); k = value of k for each numeric variable smooth in GAM formula
+  
+  # Create an empty list to collect stats, set a count to index in list, set model formula 
+  full.preds = list()
+  count = 1
+  form = build.form(dep, ind, k, dataset)
+  
+  # Path for models with Collar ID (random effect)
+  if (("CollarID" %in% ind)|("CollarID, Lux" %in% ind)){
+    u = rep(1,27)  # vector for number of unique collars in each testing group
+    rounds = nrow(dataset)/27  # rounds of data collection = number of observations in each test set (**assumes even sampling design**)
+    while (1 %in% u){  # Randomly order the dataset, see if resulting 27 divisions leave any test sets with only one collar (which would mean that collar isn't in the training set); if any do, reorder the dataset
+      samp = sample(1:nrow(dataset), nrow(dataset), replace = FALSE)
+      for (i in 1:27){
+        u[i] = length(unique(dataset[samp[((i-1)*rounds+1):(i*rounds)],"CollarID"]))
+      }
+    }
+    
+    # Run CV using divisions from random order above, generate predicted vs actual values (log and raw, if relevant)
+    for (i in 1:27){
+      train = dataset[-samp[((i-1)*rounds+1):(i*rounds)],]
+      test = dataset[samp[((i-1)*rounds+1):(i*rounds)],]
+      mod = gam(form, data = train, method = "REML")
+      preds = predict.gam(mod, test)
+      full.preds[[count]] = data.frame(Predicted = preds, Actual = test[,dep])
+      if (is.log == TRUE){
+        full.preds[[count]][,"Predicted.raw"] = exp(preds) - offset
+        full.preds[[count]][,"Actual.raw"] = test[,raw.name]
+      }
+      count = count + 1
+    }
+  }
+  
+  # Path for models without random effect
+  else{
+    # Run collar-wise CV, generate predicted vs actual values (log and raw, if relevant)
+    for (collar in unique(dataset[,"CollarID"])){
+      train = dataset %>% filter(CollarID != collar)
+      test = dataset %>% filter(CollarID == collar)
+      mod = gam(form, data = train, method = "REML")
+      preds = predict.gam(mod, test)
+      full.preds[[count]] = data.frame(Predicted = preds, Actual = test[,dep])
+      if (is.log == TRUE){
+        full.preds[[count]][,"Predicted.raw"] = exp(preds) - offset
+        full.preds[[count]][,"Actual.raw"] = test[,raw.name]
+      }
+      count = count + 1
+    }
+  }
+  
+  # Create 1-row table of diagnostics (R2, MAE, RMS)
+  full.preds = bind_rows(full.preds)
+  return(full.preds)
+}  
+
+photo.cv = collar.cv.full("log.photo", c("WL", "BM", "Lux", "Day", "Site"), photo.sub, raw.name = "neg.photo", offset = 1)
+
+ggplot(photo.cv, aes(x = Predicted, y = Actual)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Photosynthetic Flux Predicted vs Actual (log values)")
+
+ggplot(photo.cv, aes(x = Predicted.raw, y = Actual.raw)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Photosynthetic Flux Predicted vs Actual (raw values)")
+```
+
+These plots look decent, but it seems that the model is mostly underpredicting the high photosynthetic flux values. The "outliers" on the low flux end probably have an outsized effect on the model with the log transformation. 
+<Br>
+</Br>
+
+### With Collar ID as a Random Effect
+
+For this next model selection, I included the random effect from Collar ID and tried all of the same additional variables except biomass (highly related to Collar ID) and site (redundant with Collar ID). Here's what comes out:
+```{r}
+photo.select2 = best.sub("log.photo", c("Lux", "WL", "Day", "AirTemp", "Hr.of.Day", "CollarID"), photo.sub, is.log = TRUE, raw.name = "neg.photo", offset = 1, rsq.min = 0.70)
+kable(photo.select2, digits = 2)
+```
+
+**Collar ID, days since thaw, water level, and light intensity** seem to be the important variables. Adding hour of day and/or air temperature improves the model *very* marginally, but the degree is small enough that I don't think it's worth moving forward with those variables. Interestingly, these models don't improve on the cross-validated accuracy of the model without collar ID. Maybe including collar isn't so important for photosynthetic flux after all.
+
+Let's look at the model summary and smooths:
+```{r}
+gam_phot2 = gam(log.photo ~ s(Lux, k=4) + s(WL, k=4) + s(Day, k=4) + s(CollarID, bs = "re"), data = photo.sub, method = "REML")
+summary(gam_phot2)
+draw(gam_phot2)
+```
+
+The collar partial effects mostly follow the Gaussian quantiles, except for 2 collars with particularly negative effects. When I tried running the model with hour of day and air temp, hour of day did have a low P-value (0.004), though air temp did not. It looks like there could be a *slight* increase in photosynthetic flux over the course of the day, other variables being equal. Next, I checked for concurvity issues with these variables:
+
+```{r}
+concurvity(gam_phot2)
+# concurvity(gam_phot2, full = FALSE)
+```
+
+The concurvity levels are a little bit higher here, particularly for water level. I think that's because water level and Collar ID have a fairly high correlation. None of them are above 0.8, except the "worst" estimate for Collar ID which I assume has something to do with the nature of that variable - it seems like maybe Collar ID is included in the parametric effect?
+
+Here are predicted versus actual values:
+
+```{r}
+photo.cv2 = collar.cv.full("log.photo", c("WL", "Lux", "Day", "CollarID"), photo.sub, raw.name = "neg.photo", offset = 1)
+
+ggplot(photo.cv2, aes(x = Predicted, y = Actual)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Photosynthetic Flux Predicted vs Actual (log values)")
+
+ggplot(photo.cv2, aes(x = Predicted.raw, y = Actual.raw)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Photosynthetic Flux Predicted vs Actual (raw values)")
+```
+
+These plots look very similar to those for the previous model.
+<Br>
+</Br>
+
+### Including the Dark Measurements
+
+When I first tried extrapolating the photosynthesis models across time at collar TEH3 (see below), I received a bit of a shock: the model was predicting photosynthesis to occur at night! The model "knew" that photosynthesis decreases substantially at night, of course, but I hadn't fed it the boundary condition of zero light so it didn't know that zero light = zero photosynthesis. For the model below, I include all of the dark measurements. I'm not convinced that this is the best solution to the issue: including the dark measurements adds another layer of data replication, and I had to manually set all the photosynthetic fluxes to 0, which is a little different from our empirical flux measurements of light minus dark with associated measurement error (though I guess you could frame this as subtracting dark from dark...). That being said, I didn't want to include only some dark measurements and mess with the sampling design, or swap out some dark measurements for light measurements and lose information. Here's how the new model looks:
+
+```{r}
+# Create pared down table for respiration, shorten variable names (used in next section)
+resp.sub = dark %>% select(CollarID, log.resp, CO2_flux_umol_m.2_sec.1, Water_Level_cm, Days_Since_Thaw, log.Biomass, Site, Mean_Temp_C_true_estimate, Soil_Temp_C, dec.hrs, bare) %>%
+  rename(CO2_flux = CO2_flux_umol_m.2_sec.1,
+         WL = Water_Level_cm,
+         Day = Days_Since_Thaw,
+         BM = log.Biomass,
+         AirTemp = Mean_Temp_C_true_estimate,
+         SoilTemp = Soil_Temp_C,
+         Hr.of.Day = dec.hrs,
+         Bare = bare)
+
+# Make dark measurement table that conforms to existing photosynthesis table
+dark.sub = resp.sub %>% 
+  select(-c(CO2_flux, Bare, SoilTemp, log.resp)) %>%
+  mutate(Lux = rep(0, nrow(resp.sub)),
+         raw.photo = rep(0, nrow(resp.sub)),
+         log.photo = rep(0, nrow(resp.sub)), # ln(0 + 1) = 0 (using established offset)
+# Combine light and dark measurements
+         neg.photo = rep(0, nrow(resp.sub)))  
+ld.sub = rbind(photo.sub, dark.sub)
+
+gam_phot3 = gam(log.photo ~ s(Lux, k=4) + s(WL, k=4) + s(Day, k=4) + s(BM, k=4) + Site, data = ld.sub, method = "REML")
+summary(gam_phot3)
+draw(gam_phot3)
+```
+
+For whatever reason, this new model has a more complicated (and weird) relationship with light at high levels of intensity. Maybe that's because a lot of our sunniest measurements came in June, when the plants hadn't grown as much? But you'd think that would be captured in the Days Since Thaw effect.
+
+```{r}
+concurvity(gam_phot3)
+```
+
+There are still no concurvity issues, except maybe with Site (the parametric variable).
+
+```{r}
+kable(collar.cv("log.photo", c("WL", "Lux", "Day", "BM", "Site"), ld.sub, k = 4, is.log = TRUE, raw.name = "neg.photo", offset = 1), digits = 2)
+photo.cv3 = collar.cv.full("log.photo", c("WL", "Lux", "Day", "BM", "Site"), ld.sub, raw.name = "neg.photo", offset = 1)
+
+ggplot(photo.cv3, aes(x = Predicted, y = Actual)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Photosynthetic Flux Predicted vs Actual (log values)")
+
+ggplot(photo.cv3, aes(x = Predicted.raw, y = Actual.raw)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Photosynthetic Flux Predicted vs Actual (raw values)")
+```
+
+The diagnostics for this model are a little better than those for the model without dark measurements, which makes sense I suppose - there's a lot more clustered data. The predicted versus actual plots look decent - but it's interesting that the GAM is predicting a range of flux values around 0 for the dark measurements. This looks much better on the raw data plot, but it's still a little concerning. I also tried running a model with a random slope for CollarID versus Lux; the diagnostics were similar to this model - a little better for the log values, a little worse for the raw values.
+<Br>
+</Br>
+
+## Respiration
+
+The following section shows models for respiration - that is, flux from just dark measurements. These models exclude light intensity for obvious reasons.
+
+### Without Collar ID
+
+My candidate variables for respiration models without Collar ID are water level, time of year (days since thaw), log biomass, site, air temperature (corrected), soil temperature, hour of the day, and percent bare ground.
+
+```{r}
+# Create pared down table, shorten variable names
+resp.sub = dark %>% select(CollarID, log.resp, CO2_flux_umol_m.2_sec.1, Water_Level_cm, Days_Since_Thaw, log.Biomass, Site, Mean_Temp_C_true_estimate, Soil_Temp_C, dec.hrs, bare) %>%
+  rename(CO2_flux = CO2_flux_umol_m.2_sec.1,
+         WL = Water_Level_cm,
+         Day = Days_Since_Thaw,
+         BM = log.Biomass,
+         AirTemp = Mean_Temp_C_true_estimate,
+         SoilTemp = Soil_Temp_C,
+         Hr.of.Day = dec.hrs,
+         Bare = bare)
+
+# Run model selection (set min R2 = 0.8)
+resp.select = best.sub("log.resp", c("WL", "Day", "BM", "Site", "AirTemp", "SoilTemp", "Hr.of.Day", "Bare"), max.var = 6, resp.sub, is.log = TRUE, raw.name = "CO2_flux", offset = 0, rsq.min = 0.825)  # takes a long time to run - maybe 8 variables is too many; bumped rsq.min from 0.75 to 0.8, set max.var to 6 (previous iterations found that the best model has 4 variables, so testing 7 or 8 is unnecessary)
+
+kable(resp.select, digits = 2)
+```
+
+One of the best models, with an $R^2$ of 0.77, uses log biomass, days since thaw, water level, air temperature, and soil temperature. However, removing days since thaw makes very little difference, and removing soil temperature also makes little difference. This makes sense: those two variables (plus air temperature) are correlated with each other. When I run the model with these 5 variables, days since thaw has a p-value of 0.03, confirming that it's marginal; for that reason, I'm going with just **water level, log biomass, air temperature, and soil temperature** for now. Let's see the summary and plots for this model:
+
+```{r}
+gam_resp = gam(log.resp ~  s(WL, k=4) + s(BM, k=4) + s(AirTemp, k=4) + s(SoilTemp), data = resp.sub, method = "REML")
+summary(gam_resp)
+draw(gam_resp)
+```
+
+The patterns here make a lot of sense. Respiration shows a sigmoidal pattern with water level, starting to decline when the water level hits ~25 cm below ground surface, then continuing to decline steeply until about 25 cm above ground surface, where it levels out at a low flux value. Respiration seems to hold relatively steady at low above-ground biomass, presumably because some respiration is always happening in the soil, then increases roughly linearly with above-ground biomass (this is still log biomass vs log respiration). The increases in respiration with air temperature and soil temperature are both roughly linear, reflecting the expected trend with temperature. Here are the concurvity values for these variables:
+
+```{r}
+concurvity(gam_resp)
+```
+
+As expected, concurvity is high for air temperature and soil temperature, but still under 0.8 on all estimates for both. 
+
+Here are predicted versus actual values:
+
+```{r}
+resp.cv = collar.cv.full("log.resp", c("WL", "BM", "AirTemp", "SoilTemp"), resp.sub, raw.name = "CO2_flux", offset = 0)
+
+ggplot(resp.cv, aes(x = Predicted, y = Actual)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Respiration Flux Predicted vs Actual (log values)")
+
+ggplot(resp.cv, aes(x = Predicted.raw, y = Actual.raw)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Respiration Flux Predicted vs Actual (raw values)")
+```
+
+These plots look great: points are relatively evenly divided above and below the 1:1 line across the range of respiration fluxes, both for log values and raw values. The outlier log values on the low end don't really matter, since those fluxes are negligible anyway.
+<Br>
+</Br>
+
+### With Collar ID as Random Effect
+
+Next, I added Collar ID as an option and removed site and vegetation variables, like I did with photosynthesis. Here are the results:
+```{r}
+resp.select2 = best.sub("log.resp", c("WL", "Day", "AirTemp", "SoilTemp", "Hr.of.Day", "CollarID"), resp.sub, is.log = TRUE, raw.name = "CO2_flux", offset = 0, rsq.min = 0.85)
+kable(resp.select2, digits = 2)
+```
+
+It looks like the best model is the one with **collar ID, soil temp, air temp, and water level**, though again you could interchange soil temp and days since thaw with minimal penalty. The model accuracy does improve a little bit from the model without collar ID.
+
+Let's look at the model summary and smooths:
+```{r}
+gam_resp2 = gam(log.resp ~ s(WL, k=4) + s(AirTemp, k=4) + s(SoilTemp, k=4) + s(CollarID, bs = "re"), data = resp.sub, method = "REML")
+summary(gam_resp2)
+draw(gam_resp2)
+```
+
+The collar partial effects follow the Gaussian quantiles quite closely. Let's look at concurvity again:
+
+```{r}
+concurvity(gam_resp2)
+```
+
+Concurvity is fairly high for all of the variables, but none of the continuous variables are above 0.8.
+
+Here are predicted versus actual values:
+
+```{r}
+resp.cv2 = collar.cv.full("log.resp", c("WL", "AirTemp", "SoilTemp", "CollarID"), resp.sub, raw.name = "CO2_flux", offset = 0)
+
+ggplot(resp.cv2, aes(x = Predicted, y = Actual)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Respiration Flux Predicted vs Actual (log values)")
+
+ggplot(resp.cv2, aes(x = Predicted.raw, y = Actual.raw)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "Respiration Flux Predicted vs Actual (raw values)")
+```
+
+These plots look pretty similar to those for the previous model. Maybe a little better predictions for the low respiration measurements.
+<Br>
+</Br>
+
+## Methane
+
+Methane flux is harder to model than CO2 flux: the range of values between low and high methane collars is very high, making it hard to avoid large residuals. Collar seems to have a larger effect on methane flux than it does on the CO2 fluxes, as we'll see below.
+
+### Without Collar ID
+
+My candidate variables for methane models without Collar ID are water level, log biomass, site, air temperature (corrected), soil temperature, hour of the day, percent bare ground, and percent high CH4 plants.
+
+```{r}
+# Run model selection
+ch4.select = best.sub("log.CH4", c("WL","Site","BM","AirTemp", "SoilTemp", "Hr.of.Day", "Bare", "high_CH4"), dataset = ch4.sub, is.log = TRUE, raw.name = "raw.CH4", offset = 0.01, rsq.min = 0.5, max.var = 4)  # set max number of variables to 4 - having more than that doesn't help
+kable(ch4.select, digits = 3)
+
+### MAE for null model with raw data ###
+# mean(abs(ch4.sub$raw.CH4 - mean(ch4.sub$raw.CH4)))
+```
+
+There are a lot of similarly predictive models here, none of them great. All of them have really low $R^2$ values for the raw data - a product of the extreme outliers - so mean average error (MAE) is probably a more useful metric for at least the raw data. For reference, the MAE for the null model (i.e., predicting every methane flux as the global average) is 0.0728. Most of the best models include %Bare ground; let's take a look at smooths for the top model, which includes water level, %High CH4 plants, %Bare, and Site:
+
+```{r}
+gam_ch4.bare = gam(log.CH4 ~ s(WL, k = 4) + s(high_CH4, k = 4) + s(Bare, k = 4) + Site, data = ch4.sub, method = "REML")
+draw(gam_ch4.bare)
+```
+
+This relationship with %Bare seems implausible to me. I guess it comes out well in the cross validation, but even still, I don't know what physical processes would cause methane flux to go down, then up, then down as percent bare ground increases; it seems like an artifact of our specific collars. Other models that include %Bare produce roughly the same effect. The best model without %Bare includes just 2 variables, **%High CH4 plants and water level**:
+
+```{r}
+gam_ch4 = gam(log.CH4 ~ s(WL, k = 4) + s(high_CH4, k = 4), data = ch4.sub, method = "REML")
+summary(gam_ch4)
+draw(gam_ch4)
+```
+
+This model looks better. Methane flux increases with water level up to about the ground surface, then decreases with increased standing water. Scott Bridgham said that he's seen this same effect in tidal collars: the hydrostatic pressure created by deeper water inhibits gas effusion. The effect of high CH4 plants is a little more puzzling: we see an increase in methane flux up to about 50% cover, but then flux decreases after that. Maybe this has to do with which plants are included in the "high methane" category; ordinating the vegetation communities could offer improvements. It's interesting to me that soil temperature doesn't come out as important here. I suspect if we are able to add a set of measurements with truly frozen ground, that will change.
+
+Let's check concurvity with these two variables:
+```{r}
+concurvity(gam_ch4)
+```
+
+I thought that water level and %High CH4 plants might be more highly correlated, but it turns out they're pretty separate from each other. Here are the predicted vs actual graphs for raw and log values:
+
+```{r}
+ch4.cv = collar.cv.full("log.CH4", c("WL", "high_CH4"), ch4.sub, raw.name = "raw.CH4", offset = 0.01)
+
+ggplot(ch4.cv, aes(x = Predicted, y = Actual)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "CH4 Flux Predicted vs Actual (log values)")
+
+ggplot(ch4.cv, aes(x = Predicted.raw, y = Actual.raw)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "CH4 Flux Predicted vs Actual (raw values)")
+```
+
+The plot with the log values doesn't look too bad, though the positive residuals are larger than the negative ones.
+<Br>
+</Br>
+
+### With Collar ID
+
+Next, I tried to find the best model for methane flux with Collar ID included: 
+
+```{r}
+# Run model selection with CollarID
+ch4.select = best.sub("log.CH4", c("WL","AirTemp", "SoilTemp","Hr.of.Day","CollarID"), dataset = ch4.sub, is.log = TRUE, raw.name = "raw.CH4", offset = 0.01, rsq.min = 0.7)
+kable(ch4.select, digits = 3)
+```
+
+These models look much better than the ones without Collar ID. Even the $R^2$ values for the raw data are above 0.2! It looks like the best model incorporates **Collar ID, water level, and soil temp** - although soil temp doesn't have a huge effect.
+
+```{r}
+gam_ch4.2 = gam(log.CH4 ~ s(WL, k = 4) + s(SoilTemp, k = 4) + s(CollarID, bs = "re"), data = ch4.sub, method = "REML")
+summary(gam_ch4.2)
+draw(gam_ch4.2)
+```
+
+These results mostly make sense, though it's unclear why methane production would decrease as soil temperature increases above ~8 degrees C. Maybe soil temp is capturing some other effect, like higher methane production associated with groundwater? The partial effects for the collars don't really follow the Gaussian quantiles on the low end; I think the low end mostly shows the collars at West (and some at Mid) that all produce similarly low methane fluxes on a consistent basis. Let's check concurvity:
+
+```{r}
+concurvity(gam_ch4.2)
+```
+
+Again, water level and Collar ID are somewhat correlated. How about predicted vs actual values?
+
+```{r}
+ch4.cv2 = collar.cv.full("log.CH4", c("WL", "SoilTemp", "CollarID"), ch4.sub, raw.name = "raw.CH4", offset = 0.01)
+
+ggplot(ch4.cv2, aes(x = Predicted, y = Actual)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "CH4 Flux Predicted vs Actual (log values)")
+
+ggplot(ch4.cv2, aes(x = Predicted.raw, y = Actual.raw)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed") +
+  labs(title = "CH4 Flux Predicted vs Actual (raw values)")
+```
+
+Definitely an improvement on the model without Collar ID.
+<Br>
+</Br>
+
+## Effect of Decreasing the Number of Collars
+
+I thought it might be interesting to try cross validating the models with fewer collars in the training data set to see how sensitive they are. If predicting flux with 26 collars works a lot better than predicting with 24 collars, that would imply that adding a few more collars could provide a lot of benefit (not that we're considering more collars with the current project). I tried this with the methane model (without Collar ID):
+```{r}
+# Try it with decreasing # of collars...
+mae = list() # list to store model accuracy data
+ct = 1
+
+for (s in 1:10){  # loop through number of collars to take out of training set and put into test set
+  ch4.preds.decr = list()
+  count = 1
+  
+  for (i in 1:500){  # sample 1000 times for each training set size (less precision since collars will show up different numbers of times, but can't really do k-fold CV for this experiment)
+    collars = sample(unique(ch4.sub$CollarID), s, replace = FALSE)
+    train = ch4.sub %>% filter(!(CollarID %in% collars))
+    test = ch4.sub %>% filter(CollarID %in% collars)
+    mod = gam(log.CH4 ~ s(WL, k = 4) + s(high_CH4, k = 4), data = train, method = "REML")
+    preds = predict.gam(mod, test)
+    ch4.preds.decr[[count]] = data.frame(Predicted = preds,
+                              Predicted.raw = exp(preds) - 0.01,
+                              Actual = test$log.CH4,
+                              Actual.raw = test$raw.CH4)
+    count = count + 1
+  }
+  
+  ch4.preds.decr = bind_rows(ch4.preds.decr)
+  mae[[ct]] = data.frame(Collars = 27 - s,
+                         R2 = cor(ch4.preds.decr$Predicted, ch4.preds.decr$Actual)^2,
+                         MAE = mean(abs(ch4.preds.decr$Predicted - ch4.preds.decr$Actual)),
+                         RMS = sqrt(mean((ch4.preds.decr$Predicted - ch4.preds.decr$Actual)^2)),
+                         R2.raw = cor(ch4.preds.decr$Predicted.raw, ch4.preds.decr$Actual.raw)^2,   # Add raw diagnostics
+                         MAE.raw = mean(abs(ch4.preds.decr$Predicted.raw - ch4.preds.decr$Actual.raw)),
+                         RMS.raw = sqrt(mean((ch4.preds.decr$Predicted.raw - ch4.preds.decr$Actual.raw)^2))
+  )
+  ct = ct + 1
+}
+
+accuracy = bind_rows(mae)
+kable(accuracy, digits = 3)
+ggplot(accuracy, aes(x = Collars, y = MAE)) + geom_point() + labs(x = "Collars in Training Set", y = "Mean Average Error of Log Predictions")
+```
+
+The data are somewhat noisy (which makes sense given the sampling technique), and the exact results depend on which metric you look at, but it seems like the model's predictive accuracy drops off pretty slowly with a decreasing number of collars. This suggests we might not learn a ton from adding a few more collars. 
+<Br>
+</Br>
+
+## Effect of Transect
+
+Finally, I wanted to check whether collar transect has a significant effect on these models. I included transect as a random variable in the model for each type of flux and cross-validated to compare to the non-transect model:
+```{r}
+
+photo.sub$Transect = as.factor(substr(photo.sub$CollarID,1,3))
+photo.cv.t = collar.cv("log.photo", c("WL", "BM", "Lux", "Day", "Transect"), photo.sub, raw.name = "neg.photo", is.log = TRUE, k = 4, offset = 1)
+photo.cv.2 = collar.cv("log.photo", c("WL", "BM", "Lux", "Day", "Site"), photo.sub, raw.name = "neg.photo", is.log = TRUE, k = 4, offset = 1)
+kable(rbind(photo.cv.t, photo.cv.2), digits = 2, caption = "Photosynthetic Flux")
+
+resp.sub$Transect = as.factor(substr(resp.sub$CollarID,1,3))
+resp.cv.t = collar.cv("log.resp", c("WL", "BM", "AirTemp", "SoilTemp", "Transect"), resp.sub, raw.name = "CO2_flux", is.log = TRUE, k = 4, offset = 0)
+resp.cv.2 = collar.cv("log.resp", c("WL", "BM", "AirTemp", "SoilTemp"), resp.sub, raw.name = "CO2_flux", is.log = TRUE, k = 4, offset = 0)
+kable(rbind(resp.cv.t, resp.cv.2), digits = 2, caption = "Respiration Flux")
+
+ch4.sub$Transect = as.factor(substr(ch4.sub$CollarID,1,3))
+ch4.cv.t = collar.cv("log.CH4", c("WL", "high_CH4", "Transect"), ch4.sub, raw.name = "raw.CH4", is.log = TRUE, k = 4, offset = 0.01)
+ch4.cv.2 = collar.cv("log.CH4", c("WL", "high_CH4"), ch4.sub, raw.name = "raw.CH4", is.log = TRUE, k = 4, offset = 0.01)
+kable(rbind(ch4.cv.t, ch4.cv.2), digits = 2, caption = "Methane Flux")
+
+```
+
+All of these models get worse when you include transect. I tried adding position in the transect as well (1 = closest to stream channel, 3 = furthest away from channel), and that didn't help either.
+<Br>
+</Br>
+
+# Model Extrapolation: Proof of Concept with TEH3
+
+Our ultimate goal with these data is to create models we can use to extrapolate across time and space. I decided to try out a small proof of concept by predicting gas flux for every hour at one collar - TEH3 - from June 15th (our first measurement day) to Oct 2nd (our last measurement day). This [shiny app](https://spencer-d-johnson.shinyapps.io/Test_App_TEH3/) shows the results! To be clear, this is still far from a final version of what our modelling will hopefully look like, so the actual numbers should be taken with a big grain of salt.
+
+## Expressing Uncertainty
+
+An important part of our site-wide modelling is going to be how certain we are in our estimates. I've been struggling a bit on how to conceptualize uncertainty for the gas flux data, and I'd love to get some input on this if anybody has ideas. Here are a few ideas I've been considering:
+
+1) Since I'm using log-transformed data in the models, it's going to be important to sample from the full distribution of possible model outputs to get a mean estimate of gas exchange for the site. If the log predictions have a roughly normal distribution around the mean log-transformed value, then the raw fluxes (what we actually care about) are going to have a right-skewed distribution, with a **higher** mean than the mean of our predicted values.
+
+2) The `predict.gam` function has an option to give you the standard error of each prediction, which as far as I understand it is supposed to be the average error of a predicted value. At least, that's what I've seen online, though I'm not 100% sure. For simple population statistics, standard error is the average error of the *sampling distribution* - or how far off you expect your estimate of a parameter to be from the "true parameter" - which in this case would imply that the standard error is the average deviation of the prediction from the "true value" of the model. Anyway, whatever the reason, the standard errors produced by `predict.gam` seem too small: when I create a confidence interval using the standard error and Z-values, it doesn't come close encompassing the range of residuals I get when cross-validating the models. Part of this discrepancy probably comes from inflated prediction errors caused by our repeated measurements.
+
+To more accurately reflect the true range of model residuals, I've been sampling from the actual log residuals from the cross-validated models. The downside of this approach is that doesn't consider situations where there might be more or less uncertainty due to the source data: for example, a GAM will likely be more confident in the middle of the range of biomass values, where there's a lot of data to build a model off of, than at the extremes where the model is only built from a few data points. I'm also wondering if higher log residuals for lower fluxes (in the case of photosynthesis and respiration) are skewing my sampling and causing me to overestimate uncertainty for the higher flux data points: some of the confidence intervals seem implausibly wide.
+
+3) There's also a question of precision versus accuracy (I think that applies here?), or "random error" vs "fixed error". One way to get a total flux across time (and space) would be to just sample from the distribution of possible flux values at each point in time (and space), then add all those fluxes together (this is what I would consider accounting for "random error"). Given a sufficiently large number of points in time and/or space, this method seems like it should give you an accurate estimate of the total, but *not* an accurate estimate of uncertainty - the errors will all converge toward the same average, even if you run this sampling a bunch of times. Another strategy would be to find the upper and lower bounds of the flux confidence interval for each point in time (and space), then add all the upper bounds and lower bounds respectively to get a total confidence interval. This strategy would assume that errors are all perfectly correlated across time and space. 
+
+The reality is probably somewhere in between: there's some "fixed," or correlated, error, but also some random error. One way I've thought about implementing this is to estimate the fixed error as the percent of variation explained by collar. Collar ID, or location, is static, so if that explains most of the variation in flux, then most of the error from the model is probably going to be persistent across time, and possibly across space (I haven't thought much about spatial autocorrelation yet). If Collar ID explains relatively little variation, then most of the error from the model is probably going to be more related to changing environmental conditions - how plants and micro-organisms respond to particular light levels, water levels, etc. The table below shows how much variation Collar ID explains in photosynthetic, respiration, and methane flux. Though I haven't done this yet, you could use these $R^2$ values as weights in an average of the upper/lower confidence bounds and randomly sampled flux values.
+
+```{r}
+fixed.photo = summary(lm(log.photo ~ CollarID, data = photo.sub))$r.squared  # 0.195
+fixed.resp = summary(lm(log.resp ~ CollarID, data = resp.sub))$r.squared  # 0.327
+fixed.ch4 = summary(lm(log.CH4 ~ CollarID, data = ch4.sub))$r.squared  # 0.740
+
+kable(data.frame(Photosynthesis.R2 = fixed.photo, Respiration.R2 = fixed.resp, CH4.R2 = fixed.ch4), digits = 2)
+```
+
+Similar to what we saw in the models above, photosynthesis seems to have little variation explained by collar (19%), while respiration has a little more (33%) and methane has much more (74%). This suggests that methane flux probably has a lot more temporal correlation than photosynthesis and respiration.
+
+Another strategy that might work would be to build a suite of models from bootstrapped sets of collars - which could represent the fixed error - then sample randomly within those models, maybe incorporating some level of temporal or spatial autocorrelation, which would represent the random error.
+<Br>
+</Br>
+
+## Gathering Data
+
+I pulled together air temp, light, and soil temp data for the loggers near TEH3, then added in the other covariate data. I used `loess` smoothers (shown below) to get continuous data for water level and log biomass, neither of which changed a ton for this collar. I corrected the air temperatures using the model from earlier in this analysis. However, the temperatures still seem too extreme to be fully believable - for example, the nighttime temperature drops below freezing a few times in June. We probably need to do a wider assessment of our air temperature data; I know the beaver sites have more extreme temperatures than the coast, but they can't be *that* much more extreme. 
+
+```{r message = FALSE, warning = FALSE}
+# Read in logger data
+teh3 = read.csv("TEH_SoilAirLight_Summer24.csv")
+#glimpse(teh3)
+teh3$Date = mdy(teh3$Date)
+teh3$DateTime = as.POSIXct(teh3$DateTime, format = "%m/%d/%Y %H:%M", tz = "US/Aleutian")  # AKST - had to do some matching since soil temps were in AKDT; also, our new soil logger hasn't been recording on the hour (it's recording on the 49th minute), which probably doesn't matter for soil temp but it's a bit annoying
+teh3$Days_Since_Thaw = (yday(teh3$DateTime) - yday(mdy("5/2/2024"))) + hour(teh3$DateTime)/24
+
+# Convert air temps to estimate of true temp using GAM with light intensity
+teh3$AirTemp_C = teh3$AirTemp_C - predict(gam_temp, newdata = data.frame(mean_lux = teh3$Intensity_LUX))
+
+ch4.teh3 = ch4.sub %>% filter(CollarID == "TEH3")
+ch4.teh3$Days_Since_Thaw[6] = 153.5  # to get to end of time period for soil temp/light/air temp
+
+# Use loess smoothers for water level and biomass - not perfect (and barely enough data), but good enough for now
+wl.mod = loess(WL ~ Days_Since_Thaw, data = ch4.teh3)
+bm.mod = loess(BM ~ Days_Since_Thaw, data = ch4.teh3)
+
+ggplot(ch4.teh3, aes(x = Days_Since_Thaw, y = WL)) +
+  geom_point() +
+  geom_smooth() +
+  labs(x = "Days Since Thaw", y = "Water Level (cm)")
+
+ggplot(ch4.teh3, aes(x = Days_Since_Thaw, y = BM)) +
+  geom_point() +
+  geom_smooth() +
+  labs(x = "Days Since Thaw", y = "Log Biomass")
+
+teh3$Water_Level_cm = predict(wl.mod, newdata = teh3$Days_Since_Thaw)
+teh3$Log_Biomass = predict(bm.mod, newdata = teh3$Days_Since_Thaw)
+teh3$Site = as.factor(rep("East", nrow(teh3)))
+teh3$Pct_High_CH4 = rep(mean(ch4.teh3$high_CH4), nrow(teh3))
+teh3$CollarID = as.factor(rep("TEH3", nrow(teh3)))
+
+kable(head(teh3))
+
+# Make new version with names matched to GAMs
+t = teh3 %>% rename(Day = Days_Since_Thaw,
+                    AirTemp = AirTemp_C,
+                    SoilTemp = SoilTemp_C,
+                    Lux = Intensity_LUX,
+                    BM = Log_Biomass,
+                    WL = Water_Level_cm,
+                    high_CH4 = Pct_High_CH4)
+```
+
+<Br>
+</Br>
+
+## Methane Predictions
+
+First, I predicted methane without Collar ID. The predictions vs measurements in the chamber are shown below. See the [shiny app](https://spencer-d-johnson.shinyapps.io/Test_App_TEH3/) for the June to October site predictions.
+
+```{r}
+# Plot predicted methane (without Collar ID) vs actual methane in the collar measurements
+ch4.teh3$predicted.raw.CH4 = exp(predict(gam_ch4, ch4.teh3)) - 0.01
+ggplot(ch4.teh3 %>% pivot_longer(c(raw.CH4, predicted.raw.CH4)), aes(x = Days_Since_Thaw, y = value, color = name)) +
+  geom_point()
+
+# Generate predictions for full June-Oct data
+CH4.1 = predict.gam(gam_ch4, newdata = t)
+# Get model prediction residuals, find 95% CI quantiles for those residuals
+resid.ch4 = ch4.cv$Actual - ch4.cv$Predicted
+q = quantile(resid.ch4, probs = c(0.025, 0.975))
+
+# Calculate true (raw) values for predicted flux, flux sampled from distribution of log model residuals, upper CI bound for flux from log model residuals, and lower CI bound for flux from log model residuals
+teh3$CH4.flux = exp(CH4.1) - 0.01
+teh3$CH4.flux.sampled = exp(CH4.1 + sample(resid.ch4, size = length(CH4.1), replace = TRUE)) - 0.01
+teh3$CH4.flux.upper = exp(CH4.1 + q[2]) - 0.01
+teh3$CH4.flux.lower = exp(CH4.1 + q[1]) - 0.01
+```
+
+Next, I did the same thing for the methane model with Collar ID:
+
+```{r}
+ch4.teh3$predicted.raw.CH4.with.CollarID = exp(predict(gam_ch4.2, ch4.teh3)) - 0.01
+ggplot(ch4.teh3 %>% pivot_longer(c(raw.CH4, predicted.raw.CH4.with.CollarID)), aes(x = Days_Since_Thaw, y = value, color = name)) +
+  geom_point()
+
+CH4.2 = predict.gam(gam_ch4.2, newdata = t)
+resid.ch4.2 = ch4.cv2$Actual - ch4.cv2$Predicted
+q = quantile(resid.ch4.2, probs = c(0.025, 0.975))
+
+teh3$CH4.flux.collar = exp(CH4.2) - 0.01
+teh3$CH4.flux.collar.sampled = exp(CH4.2 + sample(resid.ch4.2, size = length(CH4.2), replace = TRUE)) - 0.01
+teh3$CH4.flux.collar.upper = exp(CH4.2 + q[2]) - 0.01
+teh3$CH4.flux.collar.lower = exp(CH4.2 + q[1]) - 0.01
+```
+
+For this collar, the methane predictions aren't *too* bad, and get better in the model with Collar ID.
+<Br>
+</Br>
+
+## Respiration Predictions
+
+Next, I plotted predicted versus actual values for respiration within the chamber (without Collar ID).
+
+```{r}
+resp.teh3 = resp.sub %>% filter(CollarID == "TEH3")
+
+resp.teh3$predicted.CO2_flux = exp(predict(gam_resp, resp.teh3))
+ggplot(resp.teh3 %>% pivot_longer(c(CO2_flux, predicted.CO2_flux)), aes(x = Day, y = value, color = name)) +
+  geom_point()
+
+resp.1 = predict.gam(gam_resp, newdata = t)
+resid.resp = resp.cv$Actual - resp.cv$Predicted
+q = quantile(resid.resp, probs = c(0.025, 0.975))
+
+teh3$resp.flux = exp(resp.1)
+teh3$resp.flux.sampled = exp(resp.1 + sample(resid.resp, size = length(resp.1), replace = TRUE))
+teh3$resp.flux.upper = exp(resp.1 + q[2])
+teh3$resp.flux.lower = exp(resp.1 + q[1])
+```
+
+Here we have the same thing with the model that includes Collar ID:
+
+```{r}
+resp.teh3$predicted.CO2_flux.with.CollarID = exp(predict(gam_resp2, resp.teh3))
+ggplot(resp.teh3 %>% pivot_longer(c(CO2_flux, predicted.CO2_flux.with.CollarID)), aes(x = Day, y = value, color = name)) +
+  geom_point()
+
+resp.2 = predict.gam(gam_resp2, newdata = t)
+resid.resp.2 = resp.cv2$Actual - resp.cv2$Predicted
+q = quantile(resid.resp.2, probs = c(0.025, 0.975))
+
+teh3$resp.flux.collar = exp(resp.2)
+teh3$resp.flux.collar.sampled = exp(resp.2 + sample(resid.resp.2, size = length(resp.2), replace = TRUE))
+teh3$resp.flux.collar.upper = exp(resp.2 + q[2])
+teh3$resp.flux.collar.lower = exp(resp.2 + q[1])
+```
+
+In both respiration models, the predictions are pretty spot on for TEH3.
+<Br>
+</Br>
+
+## Photosynthesis Predictions
+
+Same process with photosynthesis, showing predicted vs actual for the model without Collar ID that includes dark measurements. I skipped the model with Collar ID since it was a slightly worse model.
+
+```{r}
+photo.teh3 = ld.sub %>% filter(CollarID == "TEH3")
+
+photo.teh3$predicted.photosynthetic.flux = -exp(predict(gam_phot3, photo.teh3)) + 1
+ggplot(photo.teh3 %>% rename(photosynthetic.flux = raw.photo) %>% pivot_longer(c(photosynthetic.flux, predicted.photosynthetic.flux)),
+       aes(x = Day, y = value, color = name)) +
+       geom_point()
+
+photo.1 = predict.gam(gam_phot3, newdata = t)
+resid.photo = photo.cv3$Actual - photo.cv3$Predicted
+q = quantile(resid.photo, probs = c(0.025, 0.975))
+
+teh3$photo.flux = -exp(photo.1) + 1
+teh3$photo.flux.sampled = -exp(photo.1 + sample(resid.photo, size = length(photo.1), replace = TRUE)) + 1
+teh3$photo.flux.lower = -exp(photo.1 + q[2]) + 1
+teh3$photo.flux.upper = -exp(photo.1 + q[1]) + 1
+```
+
+The model underestimates photosynthesis quite a bit for the mid to late summer measurements at TEH3. The vegetation really grew in at TEH3 after June (see photos in the [app](https://spencer-d-johnson.shinyapps.io/Test_App_TEH3/)), so I'm guessing the model is underestimating relative biomass at the collar in July and August. There's also significant error in the first two measurements - I'm guessing because the first measurement was really sunny, while the second was quite overcast. The deltas for those two data points weren't as high before I added in the dark measurements. All of the dark measurement predictions are pretty close to 0, though not exactly 0.
+<Br>
+</Br>
+
+## Net CO2 Predictions
+
+Finally, I added photosynthesis and respiration together to get net CO2 flux predictions. Here's a plot of predicted vs actual using the models without CollarID. I skipped the models with CollarID.
+
+```{r}
+# Join photosynthesis TEH3 summary table with part of respiration TEH3 summary table
+co2.teh3 = photo.teh3 %>% inner_join(resp.teh3 %>% select(CO2_flux, predicted.CO2_flux, predicted.CO2_flux.with.CollarID, SoilTemp, Day), by = "Day")
+
+# Get predicted and actual values by adding photo and resp
+co2.teh3$predicted.netCO2.flux = co2.teh3$predicted.photosynthetic.flux + co2.teh3$predicted.CO2_flux
+co2.teh3$measured.netCO2.flux = co2.teh3$raw.photo + co2.teh3$CO2_flux
+
+ggplot(co2.teh3 %>% pivot_longer(c(measured.netCO2.flux, predicted.netCO2.flux)),
+       aes(x = Day, y = value, color = name)) +
+       geom_hline(yintercept = 0, lty = "dashed") +
+       geom_point()
+
+teh3$CO2.flux = teh3$resp.flux + teh3$photo.flux
+# Add sampled data from resp and sampled data from photo
+teh3$CO2.flux.sampled = teh3$resp.flux.sampled + teh3$photo.flux.sampled
+# For upper and lower confidence intervals, combine error from photo and resp by taking square root of sum of squared errors. This is a method used in propagating error through addition; it assumes that the two sources of error are independent, which may not be totally true, but it seems better than just adding the uncertainties together, which would assume they are perfectly correlated.
+teh3$CO2.flux.upper = teh3$CO2.flux + sqrt((teh3$photo.flux.upper - teh3$photo.flux)^2 + (teh3$resp.flux.upper - teh3$resp.flux)^2)
+teh3$CO2.flux.lower = teh3$CO2.flux - sqrt((teh3$photo.flux.lower - teh3$photo.flux)^2 + (teh3$resp.flux.lower - teh3$resp.flux)^2)
+
+# ggplot(teh3, aes(x = CO2.flux, y = CO2.flux.sampled - CO2.flux)) + geom_point()  # see sampled error distribution by CO2 flux
+
+# write.csv(teh3, "TEH3_FluxData.csv")
+# write.csv(ch4.sub, "CH4.Modelling.Data.csv")
+# save(gam_phot, file = "E:/Gas_Flux_R/Test_App_TEH3/gam_phot.rda")
+```
+
+Again, you can see the high error in the photosynthesis predictions. The dark measurement predictions just show the error in the respiration model.
+<Br>
+</Br>
+
+# Next steps
+
+Here are some ideas I'm considering moving forward:
+
+1) I'd still like to try incorporating past water levels using our continuous data from the wells - particularly for methane. It seems like methane emissions depend at least somewhat on how long a site has been flooded: for example, at West, we saw basically flat methane just after flooding in July, and increasing methane in late August even as water levels went down a little bit. Methane emissions at West were still quite low compared to East, so I don't know how big the benefit would be for modelling. We could incorporate past water levels through a moving average, or a weighted moving average (maybe exponentially weighted?), though I don't have a clear idea on the best lag time/weighting scheme. There could also be challenges in translating the well data to individual collars: some collars are quite far from the wells in their transects. I was thinking about just running linear regressions of water levels from the collar piezometers vs the nearest well water levels, but the whether that works very well is to be determined.
+
+2) We could try some more models beyond GAMs. I tried simple versions of regression trees (`rpart`) and a model tree (`cubist`) for methane flux with poor results - the cross-validated accuracy was worse than the null model. However, I suspect that those models could be made better through ensemble techniques (like boosting - as other researchers have done to model methane - or `randomForest()`). Other machine learning techniques might be useful to try as well.
+
+3) As I mention above, I want to do some more work on temperature correction - running another experiment at a weather station, maybe over a wider temperature range, and deploying a shaded temperature logger at one of the sites for comparison. I also want to deploy a sensor facing direct sunlight at the sites as another comparison point.
+
+4) It would be great to try incorporating data from vegetation ordinations (e.g., ordination-defined groupings of plant species, or axis scores).
+
+5) I found a [site](https://ecogambler.netlify.app/blog/interpreting-gams/#step-2-simulating-from-fitted-gam-models) recently that has a lot of good information on using and interpreting GAMS, including some better ways to plot smooths (including incorporating the raw or transformed data points). Those techniques would be useful for future iterations of analysis, both for better interpretation and for formal presentation.
+
+6) We are still hoping to get some frozen/winter data this year, which would improve the models. Getting data from earlier in the spring will also help, as will more summer data.
+
+7) Incorporating pressure data from the barologgers into the gas flux calculations could be helpful.
+
+8) There's a lot we still need to figure out about site level estimation - how to generalize our various vegetation data sitewide (Lindsey and Rhiannon may have a plan for this), how to extrapolate the other environmental variables sitewide, how to represent uncertainty, how to determine where the models apply (e.g., we can't model spruce trees from our data), etc.
