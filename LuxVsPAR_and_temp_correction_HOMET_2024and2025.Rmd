@@ -1,0 +1,303 @@
+---
+title: "Converting Lux to PAR"
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    theme: "journal"
+    code_folding: "hide"
+date: "`r Sys.Date()`"
+---
+
+# Homet Comparison Trial 1: Aug 23, 2024
+
+## Purpose
+
+One of the covariates we're measuring at the beaver sites is light. While we're measuring the intensity of light (as perceived by the human eye) in units of lux, what we *really* want is photosynthetically active radiation (PAR), the light that plants use for energy. We are also taking our measurements within a set of model systems - gas exchange collars that receive light through greenhouse plastic. We need to convert from $Lux_{plastic}$ to $PAR_{plastic}$ to build a model of how flux (mostly $CO_2$) responds to PAR (among other variables). Then we need to convert $Lux_{ambient}$ from the transect-level loggers to $PAR_{ambient}$ so that we can apply the flux model site-wide and across time. In theory, lux and PAR should have a linear relationship for any given light source (the slope depends on the type of light). The goals of this little experiment were to 1) measure the slope for ambient sunlight and 2) see if the same linear relationship holds under greenhouse plastic, or if the plastic affects the wavelengths of light coming through.
+
+Chris and I set up a hobo pendant logger (the same one we use at the beaver sites) to measure lux every 10 seconds next to the PAR sensor at the Homer Spit SWMP weather station. We first covered the two sensors with greenhouse plastic. While Chris manipulated the light hitting the sensors by shading them with his arms, I collected instantaneous* PAR readings from the connected computer on 10-second intervals to pair with the lux logger. I collected five data points - one from full sun, four from different levels of shading. We then left the sensor out at the weather station to capture ambient conditions, and I collected it four days later - although I only got measurements from 12:04 to 21:44 on the first day before the sensor maxed out its memory.
+
+*It seems like this must be over some time interval - I guess however much time it takes for the sensor to collect an electrical signal. The units of PAR at the SWMP station are $mmol/m^2$ (mmol of photons), which suggests something that's either instantaneous or integrated... but I have seen PAR measured in units of photon flux ($mmol/m^2/s$) in other places.
+
+```{r message = FALSE}
+# load packages, set plotting theme
+library(tidyverse)
+library(viridis)
+library(mgcv)
+library(gratia)
+theme_set(theme_bw())
+
+# read in data
+full_swmp = read.csv("Homet_8-23-24.csv") %>% rename(time = DateTimeStamp)  # swmp data (ambient PAR)
+par_plastic = read.csv("Homet_8-23-24_PAR_plastic.csv") %>% rename(time = DateTimeStamp)  # Spencer's written PAR data with plastic (from swmp sensor)
+lux = read.csv("Homet_8-23-24_lux.csv") %>% rename(time = Date.Time..GMT.09.00)  # lux data from pendant sensor
+```
+
+<Br>
+</Br>
+
+## Relationship with Plastic
+
+While we collected pretty limited data from the plastic experiment, and all of the data points but one had relatively low light intensity, the results look very linear:
+```{r}
+# Join lux and PAR data from plastic experiment
+plastic = lux %>% inner_join(par_plastic, by = "time")
+
+ggplot(plastic, aes(x = Intensity_LUX, y = PAR)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+The $R^2$ is over 0.99, as seen below. The slope comes out to 0.0000355 $(mmol/m^2)/lux$, with a 95% confidence interval of [0.0000330, 0.0000380].
+
+```{r}
+# run model, summarize and get confidence interval
+mod.plastic = lm(PAR ~ Intensity_LUX, data = plastic)
+summary(mod.plastic)
+confint(mod.plastic)
+```
+<Br>
+</Br>
+
+## Relationship with Ambient Sunlight
+
+The results from ambient sunlight are more complicated. First off, getting the results required some computation. The SWMP station measures Total PAR on 15 minute intervals, summing the PAR measurements taken every 5 seconds within those 15 minutes. In other words, $mean(PAR_{inst}) = PAR_{total} / 180$ (there are 180 5-second intervals in 15 minutes). I compared the mean instantaneous PAR to the mean lux (taken every 10 seconds) for each full 15-minute interval with no greenhouse plastic.
+
+```{r}
+# create period class time column for lux
+lux$period = hms(lux$time)
+# cut off incomplete/non-ambient time periods for lux
+lux_15min = lux %>% filter(period > "12H 30M 0S" & period <= "21H 30M 0S") 
+# create column with a different integer value for each 15 minute interval
+lux_15min$intervals = ceiling((1:nrow(lux_15min))/90)
+# Get table with 15 minute interval times from lux data, add interval number to join with summarized data below
+indices = seq(90, nrow(lux_15min), 90)
+swmp.times = lux_15min[indices, ]
+swmp.times$intervals = seq(1, nrow(lux_15min)/90, 1)
+
+# Get mean lux for each 15 minute interval
+lux_15min = lux_15min %>%
+  group_by(intervals) %>%
+  summarise(mean_lux = mean(Intensity_LUX),
+            mean_temp = mean(Temp_C)) %>% 
+  inner_join(swmp.times, by = "intervals")
+
+# convert from total PAR to instantaneous PAR
+full_swmp$PAR = full_swmp$TotPAR/180
+
+# Join lux and PAR data
+ambient = lux_15min %>% inner_join(full_swmp, by = "time") %>% select(time, mean_lux, mean_temp, ATemp, PAR)
+ambient24 = ambient
+
+# Plot lux vs par
+ggplot(ambient, aes(x = mean_lux, y = PAR)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+# show linear model with confidence interval
+mod.ambient = lm(PAR ~ mean_lux, data = ambient)
+summary(mod.ambient)
+confint(mod.ambient)
+```
+
+There's a decent linear relationship here; the slope is similar to the relationship with plastic (0.0000379), with a healthy overlap between the 95% confidence intervals ([0.0000358, 0.0000400] for ambient, [0.0000330, 0.0000380] for plastic). However, the residuals clearly follow a pattern, suggesting that the relationship isn't entirely linear, or at least isn't constant. For example, this `loess` smoother shows a much closer fit:
+```{r}
+ggplot(ambient, aes(x = mean_lux, y = PAR)) +
+  geom_point() +
+  geom_smooth(method = "loess")
+```
+
+Notice how there seems to be a change in the slope at about 50000 lux. I also tried making two separate linear models below and above 50000 lux, and that looks a little better:
+
+```{r}
+# low light model
+mod.ambient.low = lm(PAR ~ mean_lux, data = ambient %>% filter(mean_lux < 50000))
+summary(mod.ambient.low)
+confint(mod.ambient.low)
+
+# high light model
+mod.ambient.high = lm(PAR ~ mean_lux, data = ambient %>% filter(mean_lux > 50000))
+summary(mod.ambient.high)
+confint(mod.ambient.high)
+
+# plot data with lines from both models
+ggplot() +
+  geom_point(data = ambient, mapping = aes(x = mean_lux, y = PAR)) +
+  geom_line(data = ambient %>% filter(mean_lux > 50000), 
+            mapping = aes(x = mean_lux, y = fitted(mod.ambient.high)),
+            color = "red",
+            linewidth = 1) +
+  geom_line(data = ambient %>% filter(mean_lux < 50000), 
+            mapping = aes(x = mean_lux, y = fitted(mod.ambient.low)),
+            color = "yellowgreen",
+            linewidth = 1)
+```
+
+The slopes of the 2 models are markedly different (0.000056 below 50000 lux, 0.000028 above 50000 lux). 
+
+As you'd expect, lux goes down later in the day: 
+
+```{r}
+# plot lux vs PAR with color = hour of the day
+ggplot(ambient, aes(x = mean_lux, y = PAR, color = hour(hms(time)))) +
+  geom_point() +
+  scale_color_viridis_c() +
+  labs(color = "Hour of the Day")
+  
+```
+
+I'm not sure what to make if this. None of the factors I've thought of (differential shading at different times of day, measurements every 5 seconds vs 10 seconds, effects of averaging and/or summing the measurements, increasing time offset between sensors) seem like a good explanation. It really seems like there's a different type or quality of light coming through at low light levels versus high. It seems like this relationship wasn't there in the plastic experiment where we merely shaded the sensor, so maybe it has something to do with time of day? If you have any ideas, please let me know!
+
+One other note: if there is a linear relationship between lux and PAR, it should go through the origin. The model at high light intensity doesn't do this.
+<Br>
+</Br>
+
+## Conclusions
+
+1) Greenhouse plastic doesn't make a major difference in the PAR vs lux slope. There might be a small difference, but we would need more data to say for sure.
+
+2) There seems to be a nonlinear or at least multifaceted relationship between ambient lux and PAR, as measured between midday and night on August 23rd. The reason is unclear. We should re-try this comparison at some point to see if we get the same results. 
+
+# Homet Comparison Trial 2: June 5-17, 2025
+
+I ran the same experiment in June 2025, except that I set the measurement interval to 5 minutes to extend the data collection period. I got about 12 days of data on the pendant logger before hitting my storage limit. I averaged the 5 minute data within each 15 minute measurement period to match with SWMP data. Since SWMP takes an average over the full 15 minute period, I included both start and end times (e.g., for the 11:15 data point, I averaged 11:00, 11:05, 11:10, and 11:15). In this way, I was able to collect both light intensity data and temperature data to compare with PAR and temperature at the weather station.
+
+## Light Intensity
+
+Here is light intensity versus PAR, colored by hour of the day:
+```{r}
+# read in data, create datetime columns and change SWMP data to daylight savings time
+full_swmp25 = read.csv("Homet_6-5-25_to_6-17-25.csv") %>% mutate(DateTime = paste(Date, Time_GMT.09.00)) %>% drop_na(DateTime, ATemp, TotPAR) 
+full_swmp25$DateTime = mdy_hms(full_swmp25$DateTime, tz = "US/Aleutian") %>% with_tz("US/Alaska")
+lux25 = read.csv("Homet_6-5-25_to_6-17-25_lux.csv") %>% mutate(DateTime = mdy_hms(paste(Date, Time_GMT.08.00), tz = "US/Alaska"))
+
+# Join datasets, average pendant data (temp and lux) to match SWMP interval
+ambient = inner_join(full_swmp25, lux25, by = "DateTime") %>% filter(DateTime > "2025-06-05 13:00:00")
+for (row in 1:nrow(ambient)){
+  dt = ambient$DateTime[row]
+  index = which(lux25$DateTime == dt)
+  ambient$Temp_C[row] = mean(lux25$Temp_C[(index-3):index])
+  ambient$Intensity_Lux[row] = mean(lux25$Intensity_Lux[(index-3):index])
+}
+
+# convert from total PAR to instantaneous PAR
+ambient$PAR = ambient$TotPAR/180
+# Add hour of day
+ambient$Hr.of.Day = as.numeric(hms(ambient$Time_GMT.08.00), unit = "hours")
+
+# Plot lux vs par
+ggplot(ambient, aes(x = Intensity_Lux, y = PAR)) +
+  geom_point(aes(color = Hr.of.Day)) +
+  scale_color_viridis_c() +
+  geom_smooth(method = "lm", color = "black") +
+  labs(title = "Ambient Lux vs PAR, June 5-17, 2025", color = "Hour of Day")
+```
+
+In the previous trial, I only had a partial day's worth of data, and the data followed a clear curved trend. In this trial, there still seems to be a trend in the residuals, but on both sides of the trend line, so overall the linear relationship fits pretty well. There seems to be a pretty clear relationship between hour of the day and position relative to the trend line, with measurements from earlier in the day generating lower lux values than expected and measurements from later in the day generating higher ones. This matches my suspicion that the angle of light plays a big factor. There may also have been differential shading. I noticed when installing the pendant logger that the angle of light created a bit of a shadow over the logger, which was facing up but had vertical sides below the sensor. This effect presumably changes throughout the day and depends on where exactly the logger is installed. Overall, though, it seems safe to say that the relationship between Lux and PAR is measuring as roughly linear - which is how it should be - with some complications created by sensor positioning.
+
+I ran a linear model for these data, shown below:
+
+```{r}
+# show linear model with confidence interval
+mod.ambient = lm(PAR ~ Intensity_Lux, data = ambient)
+summary(mod.ambient)
+confint(mod.ambient)
+```
+
+The $R^2$ is pretty good - 96.55% - but the slope is higher than during my previous experiment. Maybe this is because the average angle of the sun is higher in June than in August?
+
+I also tried creating a GAM to account for hour of the day:
+
+```{r}
+# Show GAM with smooths
+mod2 = gam(PAR ~ s(Intensity_Lux) + s(Hr.of.Day), data = ambient)
+summary(mod2)
+draw(mod2)
+```
+
+The $R^2$ increases to 98.6% in this model, with hour capturing the positive residual for PAR in the morning and negative residual in the late afternoon/evening.
+<Br>
+</Br>
+
+## Temperature
+
+First, I plotted temperature from the pendant sensor vs SWMP temperature to check for any irregularities. As expected, pendant temperature generally tracks SWMP temperature in its trend but is much higher in the middle of the day.
+```{r}
+ggplot() +
+  geom_line(data = full_swmp25, mapping = aes(x = DateTime, y = ATemp, color = "SWMP Temp")) +
+  geom_line(data = lux25, mapping = aes(x = DateTime, y = Temp_C, color = "Pendant Temp")) +
+  labs(y = "Temperature (C)", x = "Date")
+```
+
+Here are the two plotted against each other, colored by light intensity:
+```{r}
+ggplot(ambient, aes(x = ATemp, y = Temp_C, color = Intensity_Lux)) + 
+  geom_point() + 
+  scale_color_viridis_c() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed", color = "black") +
+  labs(x = "Homer SWMP Temp (C, 15 min avg)", y = "Pendant Temp (C, 15 min avg)", color = "Pendant Lux (15 min avg)")
+```
+
+Clearly, higher light intensities create higher temperature measurements, but the relationship doesn't seem super clean. I tried creating a GAM for this relationship:
+
+```{r}
+gam_temp = gam((Temp_C - ATemp) ~ s(Intensity_Lux), data = ambient)
+summary(gam_temp)
+draw(gam_temp)
+```
+
+Clearly, there is a strong relationship between light intensity and the residual between the temperature measurements, but the relationship isn't as strong as I would have hoped (70.2% $R^2$) - especially considering that I got an $R^2$ over 90% in the previous experiment at the weather station. It seems like the effect of greater light intensity on the Pendant sensor's temperature reading levels out around 100,000 Lux. 
+
+I also considered lagged effects. Maybe if the light intensity and/or temperature has been high for a while, the sensor will heat up, causing it to overestimate temperature even more. I tried plotting autocorrelation for the residual between the two temperatures. Clearly, temperature itself is going to be at least somewhat autocorrelated - but if the residual between Pendant temperature and SWMP temperature is autocorrelated, that would seem to suggest a lagged effect of light intensity, or a lagged feedback between light intensity and sensor temperature. 
+
+```{r}
+# Create residual column, plot ACF and PACF
+ambient$Temp_resid = ambient$Temp_C - ambient$ATemp
+acf(ambient$Temp_resid)
+pacf(ambient$Temp_resid)
+```
+
+While there is autocorrelation in the temperature residuals, you can see from the partial autocorrelation function that there's no significant positive correlation beyond a lag of one measurement (i.e., 15 minutes). In fact, there seems to be a *negative* correlation at two time steps back (30 min) when accounting for the positive correlation at 15 minutes back, which is strange.
+
+I also tried including lagged light intensity as a variable. I tried different lag times, but settled on an average of 12 measurements back (3 hours) since that led to the best model fit, roughly speaking.
+
+```{r}
+# Create lagged intensity variable
+ambient$Lagged_Intensity = rep(NA, nrow(ambient))
+for (i in 12:nrow(ambient)){
+  ambient$Lagged_Intensity[i] = mean(ambient$Intensity_Lux[(i-12):(i-1)])
+}
+
+# Run GAM with lagged light intensity
+gam_temp_2 = gam((Temp_C - ATemp) ~ s(Intensity_Lux) + s(Lagged_Intensity), data = ambient)
+summary(gam_temp_2)
+draw(gam_temp_2)
+```
+
+Including lagged light intensity does improve the model ($R^2$ increases from 70% to 81%), but the effect is opposite of what I would have expected: the residual between Pendant temp and SWMP temp is *lower* when light intensity during the previous three hours was higher. This suggests that maybe the sensor is somehow "adjusting" its temperature measurements to higher light intensity a little bit?
+
+Given the differences in how we use these sensors during gas flux measurements, I don't think it would be valid to include this lagged light intensity effect in the correction model I apply to our *in situ* chamber temperatures. For now, I think it's best to just include current light intensity as a predictor, even though the $R^2$ is only 70%. Below, I add in the previous experiment's temperature data, which doesn't change the model much, then re-create the GAM predicting the temperature residual from light intensity, and save that GAM for later use.
+
+```{r}
+# rename variables from 2024 data
+ambient24$Intensity_Lux = ambient24$mean_lux
+ambient24$Temp_C = ambient24$mean_temp
+
+# combine 2024 and 2025 data
+combined = rbind(ambient %>% select(Temp_C, ATemp, Intensity_Lux, PAR), ambient24 %>% select(Temp_C, ATemp, Intensity_Lux, PAR))
+
+# Plot temperatures from combined data as before
+ggplot(combined, aes(x = ATemp, y = Temp_C, color = Intensity_Lux)) + 
+  geom_point() + 
+  scale_color_viridis_c() +
+  geom_abline(slope = 1, intercept = 0, lty = "dashed", color = "black") +
+  labs(x = "Homer SWMP Temp (C, 15 min avg)", y = "Pendant Temp (C, 15 min avg)", color = "Pendant Lux (15 min avg)")
+
+# Build GAM from combined data
+gam_temp_all = gam((Temp_C - ATemp) ~ s(Intensity_Lux), data = ambient)
+summary(gam_temp_all)
+draw(gam_temp_all)
+
+# Save the GAM
+saveRDS(gam_temp_all, file = "Temp_Correction_GAM.rds")
+```

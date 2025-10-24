@@ -23,10 +23,10 @@ gas$ptime = hms(gas$TIME)
 head(gas$ptime)
 
 # Test filtering
-test = gas %>% filter(DATE == "7/2/2024" & ptime >= "10H 3M 51S" & ptime <= "10H 10M 11S")
+# test = gas %>% filter(DATE == "7/2/2024" & ptime >= "10H 3M 51S" & ptime <= "10H 10M 11S")
 
 # Read in field data (*** check file name ***)
-times = read.csv("Visit Level Data Master.csv")
+times = read.csv("Visit Level Data Master - 10-13-25 update.csv")
 # Convert seal times to period class
 times$ptime.seal = hms(times$Time_Seal)
 times$ptime.unseal = hms(times$Time_Unseal)
@@ -50,17 +50,17 @@ for (i in 1:54){
   
   # Create interactive plot of CO2 and CH4 together
   print(ggplotly(
-    ggplot(gas.subset, aes(x = ptime, y = value)) + geom_line() + facet_wrap(~name, ncol = 1, scales = "free_y")
+    ggplot(gas.subset, aes(x = as_datetime(hms(gas.subset$TIME)), y = value)) + geom_line() + facet_wrap(~name, ncol = 1, scales = "free_y") + 
+      labs(x = "Time", y = "Concentration (PPM for CO2, PPB for CH4)")
     ))
 
 }
-
 -----------------------------------------
 
-# View light and dark together to compare slopes (example)
-gases.twm2D = gases %>% filter(ptime >= times$ptime.seal[48] & ptime <= times$ptime.unseal[48])
-ggplot(rbind(gases.twm2L, gases.twm2D), aes(x = ptime, y = CO2)) + geom_line()
-ggplot(rbind(gases.twm2L, gases.twm2D), aes(x = ptime, y = CH4)) + geom_line()
+# # View light and dark together to compare slopes (example)
+# gases.twm2D = gases %>% filter(ptime >= times$ptime.seal[48] & ptime <= times$ptime.unseal[48])
+# ggplot(rbind(gases.twm2L, gases.twm2D), aes(x = ptime, y = CO2)) + geom_line()
+# ggplot(rbind(gases.twm2L, gases.twm2D), aes(x = ptime, y = CH4)) + geom_line()
 
 # # TWH3
 # gases.twl3L = gases %>% filter(ptime >= times$ptime.seal[55] & ptime <= times$ptime.unseal[55])
